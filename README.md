@@ -1,75 +1,79 @@
 # xylz
 
-The personal site of **xylz**, an independent security researcher. One page, four links, built for xylz.online.
+![Selecting GitHub turns the page black. The colour spreads from the GitHub link outward and goes around the letters of the name.](media/pour.webp)
 
-![Choosing GitHub: the black field pours out from the link, cell by cell, and works its way around the letters](media/pour.webp)
+Source for xylz.online, the personal site of xylz, a security researcher. It is a single page with links to Immunefi, the public reports, GitHub and X.
 
-The whole page is one LED wall. Every surface you see is a lit or unlit cell, the name included, and over it sits the thin line-work of a motion tracker that locks onto whatever you point at. Choosing a destination changes the colour of the entire page. The new colour leaves the link you picked and finds its way across the wall the way water crosses uneven ground, and it goes around the letters because they are slow to cross.
+The page is drawn as an LED panel: a grid of round cells, and the name is made of lit cells. Each of the four links has its own background colour (white, sky blue, black, magenta). When you select a link, the new colour spreads across the grid from that link. Thin tracker lines mark the selected link and print where it goes.
 
-It is plain HTML, CSS and JavaScript, about 4,100 lines without a framework, a build step or WebGL. There is one self-hosted variable font and a 3.5 MB neural network that only desktops download. The first view is 131 KB over the wire.
+It is plain HTML, CSS and JavaScript (about 4,100 lines, no framework, no build step, no WebGL) with one self-hosted font. The first load is 131 KB with brotli. A 3.5 MB neural network loads later, on desktops only.
 
-## What happens on the page
+## How the colour spreads
 
-### The pour
+Each time a link is selected, a worker computes a new spread:
 
-Every pour is computed fresh:
+1. Every cell gets a random travel cost from a noise texture, with a new seed each time, so the shape differs every time.
+2. Dijkstra's algorithm finds when the colour reaches each cell, moving to 8 neighbours. The costs are rounded to multiples of 1/32, so the queue can be an array of buckets instead of a heap ([Dial's algorithm](https://doi.org/10.1145/363269.363610)), which runs in linear time. Cells of the name cost three times as much, so the colour goes around the letters.
+3. A second pass finds areas the colour is about to enclose. Each one fills from its edge as soon as it closes, so no cell is left to change after the spread ends.
+4. Cells change in order of arrival, spread evenly over 1.1 s.
+5. Each block of text changes colour when the spread reaches its centre, at the same time as the cells behind it, so it stays readable.
 
-1. The wall is a grid of cells over ground made of two octaves of value noise, with a new seed each time, so no two pours take the same shape.
-2. Arrival times come from Dijkstra's algorithm over 8 neighbours. Step costs are quantised to 1/32 of a cell, which turns the priority queue into a ring of buckets ([Dial's algorithm](https://doi.org/10.1145/363269.363610)). That makes it linear time and allocation-free. The name's lit cells cost three times as much to cross.
-3. A widest-path pass from the border finds the pockets the front is about to seal off. Each pocket floods inward from its own rim the moment it closes, so nothing is still changing when the pour ends.
-4. Cells are timed by their *rank* in arrival order and spread over 1.1 s. That keeps the duration fixed whatever the distances, without the top-to-bottom sweep that bucketing times would cause.
-5. Each block of text changes colour at the moment the front reaches its centre, together with the ground behind it, so it stays readable all the way through.
+Computing a spread takes about 13 ms. It usually runs before the click, while the pointer is still moving toward the link (see the next section).
 
-The routing takes about 13 ms in a worker. Usually it has already run before you click (see below).
+![Selecting X after GitHub: magenta spreads over black](media/pour-x.webp)
 
-![Choosing X after GitHub: magenta pours over black](media/pour-x.webp)
+## When a selection counts
 
-### It reads your aim
+Moving the pointer across a link only moves the tracker to it. The colour changes when the pointer settles on the link:
 
-A pointer passing over a link hasn't chosen it yet, so hovering only previews a destination. The tracker moves at once and the colour waits. The pour starts when the movement ends the way an aimed movement ends:
+- it stops on the link for 60 ms, or
+- it slows below 0.12 px/ms for 40 ms, or
+- it stays on the link, moving slowly, for 400 ms.
 
-- the pointer stops on the link for 60 ms
-- it slows below 0.12 px/ms for 40 ms, the final corrective phase of a pointing movement
-- it lingers slowly on the link for 400 ms
+Clicking, keyboard focus and arrow keys select immediately. Sweeping across the row, passing over a link on the way elsewhere, scrolling the page under a still pointer and turning the mouse wheel do not change the colour.
 
-Sweeps across the row, passes on the way somewhere else, a page scrolled under a still pointer and a turn of the wheel commit nothing. While the pointer is still travelling, a cone of rays cast from its smoothed velocity predicts where it is going: a dashed lead marks the guess, and the wall computes that pour in advance.
+While the pointer moves, the page also predicts which link it is heading for, from its recent velocity. It draws a dashed line to that link and computes its spread in advance.
 
-`tools/pour_intent.py` checks all of this with real mouse input in Chrome: 13 scenarios, from fast and slow sweeps to aimed stops, clicks and keys.
+`tools/pour_intent.py` tests this with real mouse input in Chrome: 13 cases, including fast and slow sweeps, aimed stops, clicks and keyboard.
 
-### It guesses where you are looking, without a camera
+## Where you are probably looking
 
-![The gaze scanpath: fixations as boxes around solid squares that grow with dwell time, joined by saccade lines](media/scanpath.webp)
+![The gaze estimate: each box is a place the eyes probably rested, the filled square grows with how long, and lines join them in order](media/scanpath.webp)
 
-The tracker also follows your eyes, or a running estimate of them, worked out from the pointer and the page alone. It runs in its own worker.
+The page estimates where your eyes are, without a camera, from the pointer and the page layout. Each estimated fixation is drawn as a box with its page coordinates. The label prints how uncertain the estimate is: "gaze, 50% within N px" means half of the estimate's probability lies within N pixels.
 
-A particle filter keeps 600 guesses of where your gaze is, in page coordinates. Between observations the guesses move the way eyes do. Fixations last a gamma-distributed ~225 ms on text and ~280 ms elsewhere. On a line of text, the next jump is a forward step of 7 to 9 characters, sometimes a short step back, and a sweep to the next line at the end. Elsewhere, the next fixation is drawn from where people tend to look on interfaces.
+How it works, in a separate worker:
 
-That comes from a neural network: [UNISAL](https://github.com/rdroste/unisal), a saliency model, fine-tuned on [UEyes](https://zenodo.org/record/8010312), a dataset of 1,980 interface screenshots eye-tracked with 62 participants. It was trained here on an RTX 4070 SUPER. On UEyes' held-out webpages:
+- A particle filter tracks 600 possible gaze points.
+- Between updates, the points move like eyes: fixations of about 225 ms on text and 280 ms elsewhere; on a line of text, jumps of 7 to 9 characters forward, sometimes back, and to the next line at the end.
+- Off text, the next fixation is drawn from a saliency map: a prediction of where people look on a screen.
+- The saliency map comes from [UNISAL](https://github.com/rdroste/unisal), fine-tuned on [UEyes](https://zenodo.org/record/8010312) (1,980 interface screenshots with eye tracking from 62 people) on an RTX 4070 SUPER. It runs in its own worker with ONNX Runtime Web, in 110 to 150 ms, on a picture of the current view.
+- The pointer position is the evidence. The hand follows the eyes by about 700 ms on average (Huang et al., summarised in [Navalpakkam et al. 2013](https://doi.org/10.1145/2488388.2488471)). When the pointer is heading for a link, the eyes are usually on that link already, so the link counts more than the pointer position. A pointer that has not moved for a while counts less.
 
-|                | CC ↑  | NSS ↑ | KLD ↓ |
-|----------------|-------|-------|-------|
-| UNISAL, pretrained | 0.331 | 0.87 | 1.45 |
+Results of the fine-tuning on UEyes' held-out webpages (higher CC and NSS and lower KLD are better):
+
+|                     | CC    | NSS  | KLD  |
+|---------------------|-------|------|------|
+| UNISAL, pretrained  | 0.331 | 0.87 | 1.45 |
 | fine-tuned on UEyes | 0.620 | 1.59 | 0.79 |
 
-Stored as int8 weights, it scores CC 0.623 against 0.622 at full precision, in 3.5 MB. ONNX Runtime Web runs it in another worker, on a picture of your current view, in 110 to 150 ms.
+The shipped model stores its weights as 8-bit integers: 3.5 MB, with a CC of 0.623 against 0.622 at full precision.
 
-The pointer is the evidence the guesses are weighed against. The hand lags the eyes by about 700 ms on average (Huang et al., as summarised by [Navalpakkam et al. 2013](https://doi.org/10.1145/2488388.2488471)). When you aim at a link your eyes are already on it, so the predicted target counts for more than the cursor. A cursor at rest says less the longer it rests.
+The pointer is a weak signal for exact eye position: in Navalpakkam's study the two correlate with r² < 0.05 at any given moment. That is why the page shows the uncertainty instead of a single point. The estimate runs only with a mouse or pen and stops 1.5 s after the last input.
 
-This has a hard limit, and the page says so. The instantaneous eye and mouse positions correlate poorly (r² < 0.05 in Navalpakkam's study), so the label prints the estimate's own uncertainty: *gaze, 50% within N px*, the radius that holds half of everything the filter believes. Each fixation leaves a box with its real page position, sinking back as newer ones arrive. The scanpath shows on mouse-driven devices only and stops computing 1.5 s after your last input.
+## The tab icon
 
-### The tab icon
+The tab icon is a 16 × 16 LED panel, one LED per pixel, spelling "xylz" in a hand-made pixel font: 4-pixel letters, a 1-pixel l and 1-pixel gaps make exactly 16 columns. On load, the name scrolls in from the right.
 
-A tab icon is 16 × 16 pixels, so it is drawn as a 16 × 16 LED panel spelling **xylz** in a hand-set LED face. Four-LED letters with one-LED gaps (the l is a single column) come to exactly sixteen columns. On load, the name scrolls into the tab.
+The colour spread continues into the icon. The page can't read where its tab is, so it estimates it from the browser window around it: wide borders at a side mean vertical tabs there, otherwise the tab bar is above, and the page aims at its middle because every position along the bar is equally likely. When the spread reaches the window edge in that direction, the icon fills from the same direction, and the browser's address-bar colour changes. Chrome updates tab icons about four times a second, so the icon changes in 250 ms steps.
 
-The pour reaches the tab too. A page can't know where its tab is, but it can measure the browser frame around it. A thick side means vertical tabs on that side. Otherwise the tab is somewhere along a strip above, and since any spot is as likely as any other, the page aims at the middle of the strip. The pour leaves the page where the line from your link to that point crosses the edge of the window. When the wall reports the colour has arrived there, the icon floods through its LEDs at the same angle, and the address-bar colour changes with it. Chrome repaints tab icons about four times a second, so the icon moves in 250 ms steps.
+![The tab icon frame by frame: the name scrolling in, then changing to white, sky blue, black and magenta, each filling from a different side](media/tab-icon.png)
 
-![The tab icon, frame by frame in Chrome: the name scrolling in on load, then the pours to white, sky, black and magenta, each entering at its own angle](media/tab-icon.png)
+## On phones
 
-### On a phone
+A finger touching a link usually starts a scroll, so touching does nothing. A tap selects the link and changes the colour. The selected link then shows an "open" button, at least 44 px tall, and only that button leaves the page. `tools/touch_test.py` tests this with simulated touch on a 390 px phone: 12 cases, including scrolls that start on each link and a fast swipe stopped by a tap.
 
-A finger landing on a link is usually the start of a scroll, so on touch screens nothing happens on touch-down. A tap selects a destination (the lock, the pour); only the selected link shows an **open** control, 44 px tall, and only that leaves the page. `tools/touch_test.py` drives this with synthesized touch on a 390 px phone: 12 scenarios, including scrolls that start on every link and a fast swipe stopped by a tap.
-
-## Measured
+## Performance
 
 On a desktop Chrome (RTX 4070 SUPER), from `tools/perf_profile.py` and `tools/perf_ab3.py`:
 
@@ -77,13 +81,13 @@ On a desktop Chrome (RTX 4070 SUPER), from `tools/perf_profile.py` and `tools/pe
 |---|---|
 | Main thread, idle | 0 % (everything stops 1.5 s after the last input) |
 | Main thread, pointer circling the links | 9 % |
-| Main thread, lens over the name | 6 % |
+| Main thread, pointer over the name | 6 % |
 | Main thread, scrolling | 4 % |
-| Worst frame while moving the pointer for 6 s | 13 to 18 ms |
-| First view over the wire (brotli) | 131 KB |
-| Neural model and runtime, desktops with 4+ cores, loaded when idle | 5.5 MB (brotli) |
+| Slowest frame while moving the pointer for 6 s | 13 to 18 ms |
+| First load, compressed with brotli | 131 KB |
+| Neural network and its runtime, loaded later on desktops with 4+ cores | 5.5 MB (brotli) |
 
-Under `prefers-reduced-motion` the colour changes without pouring, and the gaze, fluid and afterimages are off. The pointer lens stays, because it only moves when you do.
+With reduced motion turned on in the system settings, the colour changes at once instead of spreading, and the gaze estimate and other animations are off. The magnifier around the pointer stays, because it only moves when you move the pointer.
 
 ## Run it
 
@@ -103,20 +107,20 @@ In production, serve the `.br` and `.gz` files directly (`brotli_static` / `gzip
 
 ```
 site/                 the page, ready to serve as static files
-  index.html          markup: the stage, public work, elsewhere, the tracker overlay
-  style.css           the four fields as tokens, every component
-  main.js             the controller: lock, intent, hover/commit, touch, tab icon, gaze display
-  wall.js             the LED wall: cells, gaps, bloom, lens, fluid, the pour
+  index.html          the page markup
+  style.css           the four colour themes and all styles
+  main.js             selection, pointer prediction, touch, tab icon, gaze display
+  wall.js             the LED panel: cells, glow, pointer magnifier, the colour spread
   wall-worker.js      runs wall.js on an OffscreenCanvas
   gaze.js             the gaze particle filter
-  gaze-worker.js      runs it, draws the belief, decides fixations
+  gaze-worker.js      runs the filter and decides when a fixation starts
   saliency-worker.js  runs the saliency network with ONNX Runtime Web
-  tab-icon.js         the 16 x 16 LED tab icon
+  tab-icon.js         draws the 16 x 16 tab icon
   models/  vendor/  fonts/  art/
 tools/                headless-Chrome checks, recorders and build scripts
 ml/                   training and export code for the saliency model
 media/                the images in this file, recorded by tools/record.py
-DESIGN.md             the design system: tokens, components, every rule and number
+DESIGN.md             the full design specification, with every value
 ```
 
 ## Checking changes
@@ -125,12 +129,12 @@ Everything in `tools/` drives a real Chrome over the DevTools protocol. It needs
 
 | Script | What it checks |
 |---|---|
-| `pour_intent.py` | the 13 mouse scenarios for when a pour may start (must stay 13/13) |
-| `touch_test.py` | the 12 touch scenarios on a phone (must stay 12/12) |
+| `pour_intent.py` | the 13 mouse cases for when a selection counts (must pass 13/13) |
+| `touch_test.py` | the 12 touch cases on a phone (must pass 12/12) |
 | `perf_profile.py`, `perf_ab3.py`, `circle.py` | main-thread load, worst frames, long tasks |
 | `interact.py`, `capture.py`, `mobile_shots.py` | screenshots after scripted input, at desktop, laptop and phone sizes |
-| `saliency_gap.py` | how much the page's own picture of the view changes the network's answer |
-| `favicon_export.py`, `favicon_pour.py` | renders the icon set; records the tab icon through a pour |
+| `saliency_gap.py` | compares the saliency map from the page's own drawing of the view with one from a real screenshot |
+| `favicon_export.py`, `favicon_pour.py` | renders the icon files; records the tab icon while the colour changes |
 | `record.py` | the animations in this README |
 
 ## Training the model
