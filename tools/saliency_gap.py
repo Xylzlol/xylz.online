@@ -4,7 +4,7 @@ the sketch change the network's answer compared with a real screenshot of the sa
 For several views (fields, scroll positions): capture the real screenshot and the page's own sketch
 (?debug exposes the picture the worker read), run the shipped ONNX model on both, compare.
 Also: a bootstrap confidence interval for the shipped model's held-out webpage CC."""
-import base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import numpy as np
 import onnxruntime as ort
 import websocket
@@ -105,5 +105,10 @@ try:
         print(f"{name:20s} CC(real map, sketch map) = {rows[-1][1]:.3f}   KL(real || sketch) = {rows[-1][2]:.3f}", flush=True)
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%
 if rows:
     print("mean CC", round(float(np.mean([r[1] for r in rows])), 3), " mean KL", round(float(np.mean([r[2] for r in rows])), 3))

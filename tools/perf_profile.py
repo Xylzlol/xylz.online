@@ -1,11 +1,11 @@
 """Baseline performance profile: load weight, main-thread time per scenario, hottest functions."""
-import json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
 from collections import Counter
 import websocket
 
 URL = "http://localhost:8765/"
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-prof = pathlib.Path(tempfile.mkdtemp())
+prof = pathlib.Path(tempfile.mkdtemp(prefix="xylz-perf-"))
 p = subprocess.Popen([chrome, "--headless=new", "--remote-allow-origins=*", "--remote-debugging-port=0", f"--user-data-dir={prof}", "about:blank"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
 try:
@@ -118,3 +118,8 @@ try:
     print("\nheap MB", round(metrics()["JSHeapUsedSize"] / 1e6, 1), "| nodes", metrics()["Nodes"])
 finally:
     p.terminate()
+    try:
+        p.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(prof, ignore_errors=True)  # never leave the profile in %TEMP%

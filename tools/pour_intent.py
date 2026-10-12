@@ -1,6 +1,6 @@
 """Does the field (pour) change only when meant? Real mouse input over CDP at controlled speeds;
 every change of data-field is logged by a MutationObserver. Prints PASS/FAIL per scenario."""
-import json, math, pathlib, subprocess, tempfile, time, urllib.request
+import shutil, json, math, pathlib, subprocess, tempfile, time, urllib.request
 import websocket
 
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -183,3 +183,8 @@ try:
     print("SUMMARY", sum(1 for r in results if r[1]), "/", len(results))
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

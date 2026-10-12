@@ -27,9 +27,12 @@
   const tab = (() => {
     const icon = window.xylzIcon;
     const size = Math.min(64, Math.max(16, Math.round(16 * (window.devicePixelRatio || 1))));
-    const cv = document.createElement("canvas");
+    // drawn on a CPU-backed canvas and encoded asynchronously: reading a GPU canvas back with
+    // toDataURL stalled the main thread for ~60 ms on the first call
+    const cv = typeof OffscreenCanvas === "function" ? new OffscreenCanvas(size, size) : document.createElement("canvas");
     cv.width = cv.height = size;
-    const cx = cv.getContext("2d");
+    const cx = cv.getContext("2d", { willReadFrequently: true });
+    let encodeSeq = 0;
     const STEP = 250;
     let link = null;
 
@@ -87,7 +90,15 @@
         link.type = "image/png";
         document.head.append(link);
       }
-      link.href = cv.toDataURL("image/png");
+      if (!cv.convertToBlob) { link.href = cv.toDataURL("image/png"); return; }
+      // a data: URL, as every browser accepts for an icon, made off the main thread; only the newest
+      // drawing is applied if several are in flight
+      const seq = ++encodeSeq;
+      cv.convertToBlob({ type: "image/png" }).then((blob) => {
+        const fr = new FileReader();
+        fr.onload = () => { if (seq === encodeSeq) link.href = fr.result; };
+        fr.readAsDataURL(blob);
+      });
     }
 
     let job = null;
@@ -747,8 +758,12 @@
   const rail = [...document.querySelectorAll(".rail a")];
   let wallScrollQueued = false;
   function onScroll() {
-    const py = reduceMotion.matches ? 0 : -((scrollY * 0.33) % 10);
-    root.style.setProperty("--py", `${py.toFixed(1)}px`);
+    // the CSS dot screen only shows without the wall; setting its offset on the root restyles the
+    // whole page, so with the wall on it is left alone
+    if (!wallCtl) {
+      const py = reduceMotion.matches ? 0 : -((scrollY * 0.33) % 10);
+      root.style.setProperty("--py", `${py.toFixed(1)}px`);
+    }
     // the wall hears about scrolling once per frame, not once per event
     if (wallCtl && !wallScrollQueued) {
       wallScrollQueued = true;
@@ -756,7 +771,8 @@
     }
   }
   addEventListener("scroll", onScroll, { passive: true });
-  onScroll();
+  // first call in the first frame: reading scrollY while the script runs forced a layout early
+  requestAnimationFrame(onScroll);
 
   /* When the locked item leaves view, the tracker picks up the section you are reading. */
   const sections = [...document.querySelectorAll("main > section")];
@@ -823,7 +839,8 @@
       const mask = document.createElement("canvas");
       mask.width = W;
       mask.height = H;
-      const mc = mask.getContext("2d");
+      // CPU-backed, so reading its pixels does not stall on a GPU read-back
+      const mc = mask.getContext("2d", { willReadFrequently: true });
       mc.font = `900 ${size}px Archivo`;
       mc.fillText("xylz", -mm.actualBoundingBoxLeft, asc);
       const data = mc.getImageData(0, 0, W, H).data;
@@ -953,17 +970,22 @@
     }
 
     /* The pointer is a light on the panel: dots near it grow and glow; they settle back. */
-    function step() {
+    let lastStep = 0;
+    function step(now) {
       raf = 0;
       const R = gap * 10;
       let moving = false;
+      // eases a quarter of the way per 60 Hz frame, whatever the display's rate
+      const dt = lastStep && now - lastStep < 250 ? now - lastStep : 1000 / 60;
+      lastStep = now;
+      const ease = 1 - Math.pow(0.75, dt / (1000 / 60));
       const update = (p) => {
         let t = 0;
         if (pointer) {
           const d = Math.hypot(p.x - pointer.x, p.y - pointer.y);
           if (d < R) t = (1 - d / R) ** 2;
         }
-        p.k += (t - p.k) * 0.25;
+        p.k += (t - p.k) * ease;
         if (Math.abs(t - p.k) > 0.01) moving = true;
       };
       lit.forEach(update);
@@ -1056,12 +1078,12 @@
     let post = null;
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013m3");
+        const worker = new Worker("wall-worker.js?v=20261013n9");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
         const og = gaps.transferControlToOffscreen();
-        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og }, [oc, ob, og]);
+        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, debug: location.search.includes("debug") }, [oc, ob, og]);
         post = (m) => worker.postMessage(m);
       } else if (window.createWall) {
         const w = window.createWall((fn) => requestAnimationFrame(fn), (m) => committed(m));
@@ -1091,7 +1113,11 @@
     let shown = null;
     let full = false;
 
+    // with ?debug, the time each wall frame was delivered, for the smoothness checks in tools/
+    const frameLog = location.search.includes("debug") ? (window.__wallFrames = []) : null;
     function committed(m) {
+      if (frameLog && m.type === "committed") frameLog.push(performance.now());
+      if (frameLog && m.type === "slow") (window.__wallSlow = window.__wallSlow || []).push(m);
       if (m.type === "arrivals") { arrived(m); return; }
       if (m.type !== "committed" || m.rowStart === shown) return;
       shown = m.rowStart;
@@ -1229,7 +1255,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013m3");
+    const gw = new Worker("gaze-worker.js?v=20261013n9");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow() }, [oc]);
@@ -1274,7 +1300,7 @@
       }
       const nb = dots.bounds && dots.bounds();
       if (nb) textRects.push(nb);
-      gw.postMessage({ type: "layout", aois, lines, view });
+      gw.postMessage({ type: "layout", aois, lines, textLines, view });
       // what the labels must clear changes only with the layout, so it is measured here, not per jump
       obsCache = obstacles();
       segCache = wireSegs();
@@ -1504,6 +1530,10 @@
     gw.onmessage = (e) => {
       const m = e.data;
       if (m.type === "show") show(m);
+      // the worker says which model it runs: the learned one needs no saliency network, so the
+      // network (and its 14 MB runtime, whose compile competes with the first seconds' frames) only
+      // loads for the particle filter
+      else if (m.type === "model" && !m.net) startNeuralWhenIdle();
     };
 
     gaze = {
@@ -1519,8 +1549,9 @@
     /* The neural prior. Loaded only on desktop-class devices with data saving off, after the page
        is up and idle: the ONNX Runtime wasm (14 MB, about 2.4 MB with brotli) and the model
        (3.5 MB, 3.1 MB with brotli). Without it, the layout weights in gaze.js stand in. */
-    const saveData = navigator.connection && navigator.connection.saveData;
-    if ((navigator.hardwareConcurrency || 2) >= 4 && !saveData) {
+    function startNeuralWhenIdle() {
+      const saveData = navigator.connection && navigator.connection.saveData;
+      if ((navigator.hardwareConcurrency || 2) < 4 || saveData) return;
       const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
       idle(() => startNeural(), { timeout: 4000 });
     }
@@ -1528,7 +1559,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013m3", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n9", { type: "module" });
       } catch (err) {
         return;
       }
@@ -1642,6 +1673,7 @@
   }
 
   function start() {
+    builtFor = bodySize();
     tab.arrive(tab.palette());
     if (wallCtl) {
       wallCtl.size();
@@ -1669,9 +1701,16 @@
   });
 
   let resizeTimer = 0;
+  // the observer reports the body's size once when it starts; rebuilding then repeated the startup's
+  // own work, so only a real change of size rebuilds
+  let builtFor = null;
+  const bodySize = () => `${document.body.clientWidth}x${document.body.scrollHeight}|${innerWidth}x${innerHeight}`;
   new ResizeObserver(() => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
+      const now = bodySize();
+      if (now === builtFor) return;
+      builtFor = now;
       if (wallCtl) wallCtl.size();
       dots.build();
       if (wallCtl) wallCtl.masks();

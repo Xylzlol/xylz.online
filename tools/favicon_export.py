@@ -1,7 +1,7 @@
 """Renders site/tab-icon.js in headless Chrome with the site's own Archivo, for a preview sheet
 (favicon-work/sheet.png) and, with --write, the static icon files in site/.
 Needs the local server on http://localhost:8765/."""
-import base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 from PIL import Image
 
@@ -104,3 +104,8 @@ try:
         print("static icons written, svg", len(svg), "bytes")
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

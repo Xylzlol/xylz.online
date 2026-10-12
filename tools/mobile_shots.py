@@ -1,6 +1,6 @@
 """Screenshots on touch devices (mobile emulation with touch), with an optional tap first.
 Usage: mobile_shots.py <outdir>"""
-import base64, json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, base64, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 out = pathlib.Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
@@ -60,3 +60,8 @@ try:
         print(sc["name"], "touch-ui:", js("document.documentElement.classList.contains('touch-ui')"), "horizontal overflow:", overflow, "field:", js("document.documentElement.dataset.field"))
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

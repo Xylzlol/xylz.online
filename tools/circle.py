@@ -1,7 +1,7 @@
-import json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-prof = pathlib.Path(tempfile.mkdtemp())
+prof = pathlib.Path(tempfile.mkdtemp(prefix="xylz-perf-"))
 p = subprocess.Popen([chrome, "--headless=new", "--remote-allow-origins=*", "--remote-debugging-port=0", f"--user-data-dir={prof}", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
 try:
     pf = prof / "DevToolsActivePort"
@@ -42,3 +42,8 @@ try:
     print(json.dumps({"moves": k, "seconds": round(dur, 2), "wall_frames_per_s": round(ev("window.__commits") / dur, 1), "long_tasks_ms": ev("window.__long")}))
 finally:
     p.terminate()
+    try:
+        p.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(prof, ignore_errors=True)  # never leave the profile in %TEMP%

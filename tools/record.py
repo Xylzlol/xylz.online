@@ -2,7 +2,7 @@
   pour.webp     selecting GitHub: the black field pours out from the destination around the letters
   scanpath.webp the gaze scanpath following a mouse path on the black field
 Needs the local server on http://localhost:8765/. Usage: record.py <outdir>"""
-import base64, io, json, math, pathlib, subprocess, sys, tempfile, threading, time, urllib.request
+import shutil, base64, io, json, math, pathlib, subprocess, sys, tempfile, threading, time, urllib.request
 import websocket
 from PIL import Image
 
@@ -136,3 +136,8 @@ try:
     take("scanpath.webp", scan, 9.0, (0, 330, W, H), 900, fps=15)
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

@@ -54,6 +54,9 @@
       p: new Float32Array(n), div: new Float32Array(n),
       dx: new Float32Array(n), dy: new Float32Array(n),
       dx0: new Float32Array(n), dy0: new Float32Array(n),
+      // the displacement one step back, so each display frame can show the state between steps
+      pdx: new Float32Array(n), pdy: new Float32Array(n),
+      acc: 0,
       active: false,
     };
     return F;
@@ -136,10 +139,28 @@
       }
     }
     F.active = energy > 0.02 || spread > w * h * 0.02;
-    if (!F.active) { u.fill(0); v.fill(0); dx.fill(0); dy.fill(0); }
+    if (!F.active) { u.fill(0); v.fill(0); dx.fill(0); dy.fill(0); F.pdx.fill(0); F.pdy.fill(0); F.acc = 0; }
   }
 
-  function createWall(schedule, notify) {
+  /* The fluid runs on a fixed 60 Hz clock of real time, whatever the display's refresh rate: each
+     display frame advances it by as many whole steps as have elapsed (at most four, so a stalled tab
+     never fast-forwards), and draws the state between the last two steps. A 540 Hz display gets 540
+     different frames of exactly the motion a 60 Hz display shows. */
+  const FLUID_DT = 1000 / 60;
+  function fluidAdvance(F, cellPx, dt) {
+    F.acc += dt;
+    let n = 0;
+    while (F.acc >= FLUID_DT && n < 4 && F.active) {
+      F.pdx.set(F.dx); F.pdy.set(F.dy);
+      fluidStep(F, cellPx);
+      F.acc -= FLUID_DT;
+      n++;
+    }
+    if (n === 4) F.acc = 0;
+    return F.active ? F.acc / FLUID_DT : 0;
+  }
+
+  function createWall(schedule, notify, pourer) {
     const S = {
       ctx: null,
       bctx: null,
@@ -239,6 +260,7 @@
       S.cols = m.cols;
       S.rows = m.rows;
       S.pitch = m.pitch;
+      if (!S.ctx) return; // the pour thread draws nothing
       for (const c of [S.canvas, S.bloom, S.gapsCanvas]) {
         if (!c) continue;
         c.width = S.cols;
@@ -277,8 +299,16 @@
     function startFlood(now, texts) {
       const lk = S.lock;
       if (!lk || !S.old) return;
-      // the pointer's heading usually predicted this target already, so the map is ready
-      const ready = S.prepared && S.prepared.key === keyOf(lk) ? S.prepared : computePour(lk);
+      // the pointer's heading usually predicted this target already, so the map is ready; if not,
+      // the pour thread computes it (the frames keep coming meanwhile) and the flood starts when it
+      // answers, a frame or two later, with every cell still showing its old colour until then
+      let ready = S.prepared && S.prepared.key === keyOf(lk) ? S.prepared : null;
+      if (!ready && pourer) {
+        S.pending = { key: keyOf(lk), texts, msg: S.pendingMsg };
+        pourer({ type: "pourJob", lock: lk });
+        return;
+      }
+      if (!ready) ready = timed("pour, inline", () => computePour(lk));
       S.prepared = null;
       if (!ready) return;
       if (ready.islands.length) {
@@ -701,15 +731,26 @@
         S.kRow = S.rowStart;
         S.kCovKey = null;
       }
-      // coverage at rest depends on the masks, the rows shown and (for the deep echo) the scroll
+      /* Which rows this frame draws: the ones on screen, half a screen above and below (so a scroll
+         never reveals an undrawn row), and a rotating eighth of the rest, so nothing off screen is more
+         than eight frames old. Everything a cell shows is a function of time, so a row drawn late is
+         exactly what it would have been. */
+      const vr0 = Math.floor(S.scrollY / pitch) - S.rowStart;
+      const vrn = Math.ceil((S.vh || 900) / pitch);
+      const on0 = Math.max(0, vr0 - (vrn >> 1)), on1 = Math.min(rows, vr0 + vrn + (vrn >> 1) + 1);
+      const sweep = Math.max(1, Math.ceil(rows / 8));
+      S.sweepAt = ((S.sweepAt || 0) + sweep) % rows;
+      const sw0 = S.sweepAt, sw1 = S.sweepAt + sweep;
+      const rowOn = (r) => (r >= on0 && r < on1) || (r >= sw0 && r < sw1) || (r + rows >= sw0 && r + rows < sw1);
+      // coverage at rest depends on the masks, the rows shown and (for the deep echo) the scroll; each
+      // row is recomputed only when it is drawn and its key has changed
       const covKey = `${S.rowStart}|${S.scrollY}|${S.masksRev}`;
-      if (S.kCovKey !== covKey) {
-        if (!S.kCov || S.kCov.length !== cols * rows) S.kCov = new Float32Array(cols * rows);
-        for (let r = 0, i = 0; r < rows; r++) {
-          const y = (r + S.rowStart) * pitch + pitch / 2;
-          for (let c = 0; c < cols; c++, i++) S.kCov[i] = cover(c * pitch + pitch / 2, y);
-        }
-        S.kCovKey = covKey;
+      if (!S.kCov || S.kCov.length !== cols * rows) { S.kCov = new Float32Array(cols * rows); S.kCovRow = new Array(rows).fill(null); }
+      for (let r = 0; r < rows; r++) {
+        if (S.kCovRow[r] === covKey || !rowOn(r)) continue;
+        const y = (r + S.rowStart) * pitch + pitch / 2;
+        for (let c = 0, i = r * cols; c < cols; c++, i++) S.kCov[i] = cover(c * pitch + pitch / 2, y);
+        S.kCovRow[r] = covKey;
       }
       const d = S.img.data;
       const gd = S.gimg.data;
@@ -723,12 +764,18 @@
       // so when the last cell turns, nothing is left to change
       const WAKE = 0.035;
       const wakeLevel = fl ? 0.7 * Math.min(1, (1 - front) / 0.12) : 0;
-      const decay = 0.075;
+      // afterglow fades by 0.075 per 60 Hz frame, whatever the display's rate: per millisecond here
+      const decay = 0.075 * Math.min(6, S.frameDt / FLUID_DT);
+      const fa = S.fluidAlpha;
       const lk = S.lock;
       const fr = field[0], fg = field[1], fb = field[2];
       const dr = ink[0] - fr, dg = ink[1] - fg, db = ink[2] - fb;
       let i = 0;
+      let dirty0 = rows, dirty1 = -1;
       for (let r = 0; r < rows; r++) {
+        if (!rowOn(r)) { i += cols; continue; }
+        if (r < dirty0) dirty0 = r;
+        dirty1 = r;
         const row = r + S.rowStart;
         const docY = row * pitch + pitch / 2;
         const vy = docY - S.scrollY;
@@ -738,8 +785,9 @@
           let px = docX, py = docY;
           if (F) {
             const fx = docX / cp, fy = docY / cp - S.rowStart / 2;
-            px -= bilerp(F.dx, F.w, F.h, fx, fy);
-            py -= bilerp(F.dy, F.w, F.h, fx, fy);
+            const ax = bilerp(F.pdx, F.w, F.h, fx, fy), ay = bilerp(F.pdy, F.w, F.h, fx, fy);
+            px -= ax + (bilerp(F.dx, F.w, F.h, fx, fy) - ax) * fa;
+            py -= ay + (bilerp(F.dy, F.w, F.h, fx, fy) - ay) * fa;
           }
           // which field this cell still shows: the old one until the pour reaches it
           // which field this cell shows: the one it showed before, until the pour reaches it
@@ -816,7 +864,9 @@
           }
         }
       }
-      S.ctx.putImageData(S.img, 0, 0);
+      // upload only the band of rows drawn this frame (the sweep can wrap; then it is the whole panel)
+      const dh = dirty1 - dirty0 + 1;
+      if (dh > 0) S.ctx.putImageData(S.img, 0, 0, 0, dirty0, cols, dh);
       // the gap layer only changes while a pour runs or the rows / field change
       // the gap layer only changes while a pour runs, or when the rows, the field or the per-cell
       // history change; it is drawn only once the gap colour is known
@@ -825,14 +875,20 @@
         S.gctx.putImageData(S.gimg, 0, 0);
         S.gapKey = fl ? null : gapKey;
       }
-      if (S.bctx && S.glow > 0) S.bctx.putImageData(S.img, 0, 0);
+      if (S.bctx && S.glow > 0 && dh > 0) S.bctx.putImageData(S.img, 0, 0, 0, dirty0, cols, dh);
       notify({ type: "committed", rowStart: S.rowStart });
     }
 
     function tick(now) {
+      timed("frame", () => tick0(now));
+    }
+    function tick0(now) {
       S.queued = false;
       if (!S.visible || !S.img) return;
-      if (S.fluid && S.fluid.active) fluidStep(S.fluid, S.pitch * 2);
+      // real time since the last drawn frame (a fresh start counts as one 60 Hz frame)
+      S.frameDt = S.lastTick && now - S.lastTick < 250 ? now - S.lastTick : FLUID_DT;
+      S.lastTick = now;
+      S.fluidAlpha = S.fluid && S.fluid.active ? fluidAdvance(S.fluid, S.pitch * 2, S.frameDt) : 0;
       if (S.flood && now - S.flood.at >= S.flood.ms) {
         S.flood = null;
         S.cellOld.fill(0);
@@ -850,10 +906,45 @@
       schedule(tick);
     }
 
+    // with debug on, anything in the worker that takes more than 8 ms is reported by name
+    function timed(what, fn) {
+      if (!S.debug) return fn();
+      const t0 = performance.now();
+      const r = fn();
+      const ms = performance.now() - t0;
+      if (ms > 8) notify({ type: "slow", what, ms: Math.round(ms * 10) / 10, at: Math.round(t0) });
+      return r;
+    }
     function handle(m) {
+      return timed("message " + m.type, () => handle0(m));
+    }
+
+    // tell the page when the pour reaches each block of text, so its colour turns then
+    function reportArrivals(m) {
+      if (m.texts) {
+        const fl = S.flood;
+        const list = m.texts.map((t) => {
+          if (!fl) return 0;
+          const c = Math.min(S.cols - 1, Math.max(0, Math.floor((t.x + t.w / 2) / S.pitch)));
+          const r = Math.floor((t.y + t.h / 2) / S.pitch) - S.rowStart;
+          if (r < 0 || r >= S.rows) return fl.ms;
+          return Math.min(1, fl.dist[r * S.cols + c]) * fl.ms;
+        });
+        // and when it reaches the probe point (where the pour leaves the page for the tab icon)
+        let probe = -1;
+        if (fl && m.probe) {
+          const c = Math.min(S.cols - 1, Math.max(0, Math.floor(m.probe.x / S.pitch)));
+          const r = Math.floor(m.probe.y / S.pitch) - S.rowStart;
+          probe = r < 0 || r >= S.rows ? fl.ms : Math.min(1, fl.dist[r * S.cols + c]) * fl.ms;
+        }
+        notify({ type: "arrivals", seq: m.seq, list, probe });
+      }
+    }
+    function handle0(m) {
       const now = performance.now();
       switch (m.type) {
         case "init":
+          S.debug = !!m.debug;
           S.canvas = m.canvas;
           S.gapsCanvas = m.gaps || null;
           // transparent until its first frame, so the page background shows through, never black
@@ -887,27 +978,36 @@
           S.amp = m.amp;
           S.glow = m.glow;
           if (S.prev) S.prev.fill(0);
+          S.pending = null;
+          S.pendingMsg = m;
           if (m.cut && !S.reduce) startFlood(now, m.texts);
+          if (S.pending) break; // the pour thread is computing it: arrivals are reported when it starts
           if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; } // a plain cut
-          // tell the page when the pour reaches each block of text, so its colour turns then
-          if (m.texts) {
-            const fl = S.flood;
-            const list = m.texts.map((t) => {
-              if (!fl) return 0;
-              const c = Math.min(S.cols - 1, Math.max(0, Math.floor((t.x + t.w / 2) / S.pitch)));
-              const r = Math.floor((t.y + t.h / 2) / S.pitch) - S.rowStart;
-              if (r < 0 || r >= S.rows) return fl.ms;
-              return Math.min(1, fl.dist[r * S.cols + c]) * fl.ms;
-            });
-            // and when it reaches the probe point (where the pour leaves the page for the tab icon)
-            let probe = -1;
-            if (fl && m.probe) {
-              const c = Math.min(S.cols - 1, Math.max(0, Math.floor(m.probe.x / S.pitch)));
-              const r = Math.floor(m.probe.y / S.pitch) - S.rowStart;
-              probe = r < 0 || r >= S.rows ? fl.ms : Math.min(1, fl.dist[r * S.cols + c]) * fl.ms;
-            }
-            notify({ type: "arrivals", seq: m.seq, list, probe });
+          reportArrivals(m);
+          break;
+        }
+        case "pourResult": {
+          // the pour thread's answer: a pending flood starts now; a prediction is kept for later
+          const r = m.result;
+          if (!r) break;
+          if (S.pending && S.pending.key === r.key) {
+            const p = S.pending;
+            S.pending = null;
+            S.prepared = r;
+            startFlood(performance.now(), p.texts);
+            if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; }
+            if (p.msg) reportArrivals(p.msg);
+            queue();
+          } else if (S.wantKey === r.key) {
+            S.prepared = r;
           }
+          break;
+        }
+        case "pourJob": {
+          // in the pour thread: compute and send back, the arrays transferred, not copied
+          S.lock = m.lock;
+          const res = computePour(m.lock);
+          notify({ type: "pourResult", result: res }, res ? [res.rank.buffer] : []);
           break;
         }
         case "scroll":
@@ -938,7 +1038,11 @@
               S.prepTimer = 0;
               const box = S.wantPrep;
               S.wantPrep = null;
-              if (box && !S.reduce && S.img && (!S.prepared || S.prepared.key !== keyOf(box))) S.prepared = computePour(box);
+              if (box && !S.reduce && S.img && (!S.prepared || S.prepared.key !== keyOf(box))) {
+                S.wantKey = keyOf(box);
+                if (pourer) pourer({ type: "pourJob", lock: box });
+                else S.prepared = timed("prepare pour", () => computePour(box));
+              }
             }, 30);
           }
           return;

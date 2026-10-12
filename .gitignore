@@ -26,3 +26,8 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# training runs, model caches and experiments stay local
+/ml/runs/
+/ml/hf/
+/ml/variants/

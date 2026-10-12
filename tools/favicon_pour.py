@@ -1,6 +1,6 @@
 """Records every tab icon (link rel=icon href) and theme-color change through a real pour, then
 writes the frames as a strip, with their times after the pour began."""
-import base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, base64, io, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 from PIL import Image, ImageDraw
 
@@ -94,3 +94,8 @@ try:
     sheet.save(out / f"favicon-pour-{layout}.png")
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

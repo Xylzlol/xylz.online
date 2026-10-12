@@ -1,6 +1,6 @@
 """A/B frame timing on the real GPU: rAF intervals and long animation frames while the pointer
 circles, for the current build and with parts of the gaze display switched off by injected CSS."""
-import json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, json, math, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -90,8 +90,11 @@ def run(v):
         return gpu, json.loads(r), jumps
     finally:
         proc.terminate()
-
-
+        try:
+            proc.wait(timeout=15)
+        except Exception:
+            pass
+        shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%
 def summarise(d, loaf):
     d = sorted(d)
     if not d:

@@ -1,5 +1,5 @@
 """Headless interaction captures: real mouse moves, then a screenshot."""
-import base64, json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, base64, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 out = pathlib.Path(sys.argv[1])
@@ -94,3 +94,8 @@ try:
     print('EXCEPTIONS', EXC)
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

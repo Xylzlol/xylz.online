@@ -2,7 +2,7 @@
 with synthesized touch gestures. Every scenario logs link activations (clicks on links, which would
 navigate), hash changes, field changes and scroll, and prints PASS/FAIL against what a phone visitor
 should get. Links are kept from actually navigating so each scenario sees its own result."""
-import json, pathlib, subprocess, sys, tempfile, time, urllib.request
+import shutil, json, pathlib, subprocess, sys, tempfile, time, urllib.request
 import websocket
 
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -175,3 +175,8 @@ try:
     print("SUMMARY", sum(results), "/", len(results))
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

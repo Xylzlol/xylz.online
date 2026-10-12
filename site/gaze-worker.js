@@ -1,8 +1,15 @@
-/* The gaze estimate off the main thread: the particle filter (gaze.js), its picture (the belief as
-   LED cells, on an OffscreenCanvas the page handed over), and the fixation-like decision of when the
-   tracker jumps. The page only hears about real jumps. With no input for 1.5s the loop stops and the
-   picture holds still; any input wakes it. */
-importScripts("gaze.js?v=20261013m3");
+/* The gaze estimate off the main thread: the learned model (gaze-net.js with gaze-net.bin, 43 KB) or,
+   if its weights cannot load, the particle filter (gaze.js); the belief's picture (LED cells, on an
+   OffscreenCanvas the page handed over); and the fixation-like decision of when the tracker jumps.
+   The page only hears about real jumps. With no input for 1.5s the loop stops and the picture holds
+   still; any input wakes it. */
+importScripts("gaze.js?v=20261013n9");
+const createParticles = self.createGaze;
+importScripts("gaze-net.js?v=20261013n9");
+const createNet = self.createGaze;
+let netReady = null; // a promise of the parsed weights, or null when they failed
+netReady = fetch("gaze-net.bin?v=20261013n9").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
+  .then((buf) => { createNet.setNet(createNet.parse(buf)); return true; }).catch(() => false);
 
 let g = null;
 let canvas = null, ctx = null;
@@ -15,6 +22,7 @@ let lastDraw = 0;
 let shown = null;
 let awaySince = 0;
 let labelRect = null;
+let lastLayout = null;
 const IDLE_MS = 1500;
 
 const raf = self.requestAnimationFrame ? (fn) => self.requestAnimationFrame(fn) : (fn) => setTimeout(() => fn(performance.now()), 16);
@@ -32,8 +40,16 @@ function draw(est) {
   if (!ctx) return;
   const p = pitch;
   // only the belief close to the estimate is drawn, however wide the uncertainty: the label states it
-  const reach2 = Math.min(110, Math.max(50, est.r50 * 1.6)) ** 2;
+  const reach = Math.min(110, Math.max(50, est.r50 * 1.6)), reach2 = reach * reach;
   const mass = new Map();
+  if (g.samples) {
+    // the learned model: 512 points drawn from its mixture, binned like the particles were
+    for (const [x, y] of g.samples(512)) {
+      if ((x - est.x) ** 2 + (y - est.y) ** 2 > reach2) continue;
+      const k = Math.floor(x / p) * 100000 + Math.floor(y / p);
+      mass.set(k, (mass.get(k) || 0) + 1);
+    }
+  }
   const { P, N } = g;
   for (let i = 0; i < N; i++) {
     if ((P.x[i] - est.x) ** 2 + (P.y[i] - est.y) ** 2 > reach2) continue;
@@ -111,7 +127,18 @@ onmessage = (e) => {
       }
       break;
     case "init":
-      g = self.createGaze(m.N);
+      // the learned model when its weights are in, the particle filter otherwise; the first layout
+      // message usually arrives after the weights, and a late load swaps the model in then
+      g = createParticles(m.N);
+      netReady.then((ok) => {
+        postMessage({ type: "model", net: ok });
+        if (!ok) return;
+        const last = g;
+        g = createNet(m.N);
+        if (lastLayout) g.layout(lastLayout);
+        if (last && lastLayout) g.view(lastLayout.view);
+        wake();
+      });
       canvas = m.canvas;
       ctx = canvas.getContext("2d");
       pitch = m.pitch;
@@ -123,6 +150,7 @@ onmessage = (e) => {
       break;
     case "layout":
       view = m.view;
+      lastLayout = m;
       g.layout(m);
       break;
     case "view":

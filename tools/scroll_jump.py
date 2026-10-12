@@ -3,7 +3,7 @@ reports each frame's scroll offset) during wheel scrolling, finds the top edge o
 cells in each frame and adds that frame's scroll offset. The sum is the name's position on the
 page; it must stay constant. Prints how many frames were off and by how much.
 Needs the local server on http://localhost:8765/."""
-import base64, io, json, pathlib, subprocess, tempfile, threading, time, urllib.request
+import shutil, base64, io, json, pathlib, subprocess, tempfile, threading, time, urllib.request
 import numpy as np
 import websocket
 from PIL import Image
@@ -100,3 +100,8 @@ try:
           f"frames where the name is out of place: {int((off > 2).sum())}  worst {off.max()} px")
 finally:
     proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        pass
+    shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%

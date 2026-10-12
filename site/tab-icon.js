@@ -46,10 +46,54 @@
   }
   const mix = (a, b, t) => `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * t)).join(",")})`;
 
+  /* Square LEDs (up to 48 px): written straight into a pixel buffer. Each pixel takes its LED's
+     colour and its alpha from the rounded tile's coverage (drawn once per size and cached), which is
+     what filling and clipping produce, without 256 colour-string parses and fills per frame. */
+  const tileMasks = new Map();
+  const parsed = new Map();
+  function tileMask(s) {
+    let m = tileMasks.get(s);
+    if (m) return m;
+    const c = typeof OffscreenCanvas === "function" ? new OffscreenCanvas(s, s) : Object.assign(document.createElement("canvas"), { width: s, height: s });
+    const x = c.getContext("2d", { willReadFrequently: true });
+    const r = s * 0.2;
+    // the coverage exactly as the drawing path makes it: clip to the tile, then fill
+    x.beginPath();
+    x.moveTo(r, 0); x.arcTo(s, 0, s, s, r); x.arcTo(s, s, 0, s, r); x.arcTo(0, s, 0, 0, r); x.arcTo(0, 0, s, 0, r);
+    x.closePath();
+    x.clip();
+    x.fillStyle = "#000";
+    x.fillRect(0, 0, s, s);
+    const d = x.getImageData(0, 0, s, s).data;
+    m = new Uint8ClampedArray(s * s);
+    for (let i = 0; i < s * s; i++) m[i] = d[i * 4 + 3];
+    tileMasks.set(s, m);
+    return m;
+  }
+  const col3 = (css) => { let v = parsed.get(css); if (!v) { v = rgb(css); parsed.set(css, v); } return v; };
+  function drawPixels(ctx, s, palOf, on) {
+    const p = s / 16, mask = tileMask(s);
+    const img = ctx.createImageData(s, s), d = img.data;
+    for (let i = 0; i < 256; i++) {
+      const pal = palOf(i), row = i >> 4, col = i & 15;
+      const c = col3(on[i] ? pal.ink : pal.field);
+      const x0 = Math.round(col * p), y0 = Math.round(row * p);
+      const x1 = Math.round((col + 1) * p), y1 = Math.round((row + 1) * p);
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const k = y * s + x, o = k * 4;
+          d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = mask[k];
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
   function draw(ctx, size, palOf, opt = {}) {
     const s = size, p = s / 16;
     const on = opt.shift ? bitmap(opt.shift) : lit;
     const round = s >= 64;
+    if (!round) { drawPixels(ctx, s, palOf, on); return; }
     ctx.clearRect(0, 0, s, s);
     // the tile: rounded, its ground per LED (so a pour shows on the ground as well as the letters)
     ctx.save();
