@@ -1,5 +1,3 @@
-# xylz
-
 ![Selecting GitHub turns the page black. The colour spreads from the GitHub link outward and goes around the letters of the name.](media/pour.webp)
 
 Source for xylz.online, the personal site of xylz, a security researcher. It is a single page with links to Immunefi, the public reports, GitHub and X.
