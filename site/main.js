@@ -1079,12 +1079,12 @@
     let givePort = null; // hands the wall a port to the gaze worker, for its change map
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013n14");
+        const worker = new Worker("wall-worker.js?v=20261013n18");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
         const og = gaps.transferControlToOffscreen();
-        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, debug: location.search.includes("debug") }, [oc, ob, og]);
+        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, debug: location.search.includes("debug"), rec: /[?&]rec(?:[=&]|$)/.test(location.search) }, [oc, ob, og]);
         post = (m) => worker.postMessage(m);
         givePort = (port) => worker.postMessage({ type: "motionPort", port }, [port]);
       } else if (window.createWall) {
@@ -1096,6 +1096,7 @@
       post = null;
     }
     if (!post) return null;
+    if (location.search.includes("debug")) window.__dumpWallRec = () => post({ type: "dumpRec" });
     document.body.prepend(host);
     root.classList.add("wall-on");
 
@@ -1121,6 +1122,7 @@
       if (frameLog && m.type === "committed") frameLog.push(performance.now());
       if (frameLog && m.type === "slow") (window.__wallSlow = window.__wallSlow || []).push(m);
       if (m.type === "arrivals") { arrived(m); return; }
+      if (m.type === "rec") { window.__wallRec = m.log; return; }
       if (m.type !== "committed" || m.rowStart === shown) return;
       shown = m.rowStart;
       host.style.setProperty("--top", `${shown * wallPitch}px`);
@@ -1257,7 +1259,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013n14");
+    const gw = new Worker("gaze-worker.js?v=20261013n18");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow(), dyn: /[?&]dyn(?:[=&]|$)/.test(location.search) }, [oc]);
@@ -1571,7 +1573,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013n14", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n18", { type: "module" });
       } catch (err) {
         return;
       }

@@ -153,6 +153,7 @@
     while (F.acc >= FLUID_DT && n < 4 && F.active) {
       F.pdx.set(F.dx); F.pdy.set(F.dy);
       fluidStep(F, cellPx);
+      F.steps = (F.steps || 0) + 1;
       F.acc -= FLUID_DT;
       n++;
     }
@@ -231,6 +232,110 @@
         return (n / k) * m.t;
       }
       return litAt(m, mx, my, S.pitch / 3) ? m.t : 0;
+    }
+
+    /* How far the point (x, y) can move, in page px, before cover() there could change. Every mask
+       is a grid of on/off pixels (the name: its cells; an image mask: its data > 127), and a lookup
+       can only change when a sample crosses into a pixel of the other value. A chessboard distance
+       map per mask (built once per masks message) gives, for each pixel, how many pixels away the
+       nearest one of the other value is; a sample can then move by that many, less one, plus its
+       distance to its own pixel's edge, and still read the same. Within the smallest such margin
+       of a cell's samples, cover() is provably unchanged, so a cell the fluid nudges by less shows
+       exactly what it shows at rest. */
+    const edge = (v) => { const f = v - Math.floor(v); return f < 1 - f ? f : 1 - f; };
+    function chess(on, w, h) {
+      // distance from each pixel to the nearest pixel of the other value (outside counts as off),
+      // in pixels, capped at 255: two chamfer passes over the 8-neighbourhood
+      const big = 255;
+      const d0 = new Uint8Array(w * h), d1 = new Uint8Array(w * h); // to the nearest off / on pixel
+      for (let y = 0, k = 0; y < h; y++) {
+        for (let x = 0; x < w; x++, k++) {
+          const edgeD = Math.min(x + 1, y + 1, w - x, h - y, big);
+          d0[k] = on[k] ? edgeD : 0;
+          d1[k] = on[k] ? 0 : big;
+        }
+      }
+      for (const d of [d0, d1]) {
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const k = y * w + x;
+            let v = d[k];
+            if (!v) continue;
+            if (x > 0 && d[k - 1] + 1 < v) v = d[k - 1] + 1;
+            if (y > 0) {
+              if (d[k - w] + 1 < v) v = d[k - w] + 1;
+              if (x > 0 && d[k - w - 1] + 1 < v) v = d[k - w - 1] + 1;
+              if (x < w - 1 && d[k - w + 1] + 1 < v) v = d[k - w + 1] + 1;
+            }
+            d[k] = v;
+          }
+        }
+        for (let y = h - 1; y >= 0; y--) {
+          for (let x = w - 1; x >= 0; x--) {
+            const k = y * w + x;
+            let v = d[k];
+            if (!v) continue;
+            if (x < w - 1 && d[k + 1] + 1 < v) v = d[k + 1] + 1;
+            if (y < h - 1) {
+              if (d[k + w] + 1 < v) v = d[k + w] + 1;
+              if (x < w - 1 && d[k + w + 1] + 1 < v) v = d[k + w + 1] + 1;
+              if (x > 0 && d[k + w - 1] + 1 < v) v = d[k + w - 1] + 1;
+            }
+            d[k] = v;
+          }
+        }
+      }
+      const out = new Uint8Array(w * h);
+      for (let k = 0; k < w * h; k++) out[k] = on[k] ? d0[k] : d1[k];
+      return out;
+    }
+    // the margin of one sample at mask pixel coordinates (u, v), in mask pixels; `floor` for the
+    // name's cells (maskAt floors), truncation for image masks (litAt and the soft samples use |0,
+    // so pixel 0 spans -1..1 there: the edge distance below is then on the small, safe side)
+    function sampleMargin(dt, w, h, u, v, floor) {
+      const iu = floor ? Math.floor(u) : u | 0, iv = floor ? Math.floor(v) : v | 0;
+      if (iu < 0 || iv < 0 || iu >= w || iv >= h) {
+        // outside the data: off; it can only change by reaching the data's edge
+        const lo = floor ? 0 : -1;
+        const ox = u < lo ? lo - u : u >= w ? u - w : 0, oy = v < lo ? lo - v : v >= h ? v - h : 0;
+        return Math.max(ox, oy);
+      }
+      return dt[iv * w + iu] - 1 + Math.min(edge(u), edge(v));
+    }
+    function maskMargin(m, x, y) {
+      if (m.cells) {
+        if (!m.__dt) m.__dt = chess(m.cells, m.cols, m.rows);
+        return sampleMargin(m.__dt, m.cols, m.rows, x / S.pitch - m.c0, y / S.pitch - m.r0, true) * S.pitch;
+      }
+      if (!m.data) return 0;
+      if (!m.__dt) {
+        const on = new Uint8Array(m.w * m.h);
+        for (let k = 0; k < on.length; k++) on[k] = m.data[k] > 127 ? 1 : 0;
+        m.__dt = chess(on, m.w, m.h);
+      }
+      const sc = m.scale;
+      const mx = (x - m.x) / sc;
+      const my = (y - m.y - S.scrollY * (1 - m.depth)) / sc;
+      if (!(Number.isFinite(mx) && Number.isFinite(my))) return 0;
+      // the bounds test maskAt does before sampling
+      let g = Math.min(Math.abs(mx + 2), Math.abs(m.w + 2 - mx), Math.abs(my + 2), Math.abs(m.h + 2 - my));
+      if (mx < -2 || my < -2 || mx >= m.w + 2 || my >= m.h + 2) return g * sc;
+      if (m.soft) {
+        const r = (S.pitch * 0.8) / sc;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) g = Math.min(g, sampleMargin(m.__dt, m.w, m.h, mx + dx * r, my + dy * r, false));
+        }
+      } else {
+        const q = S.pitch / 3;
+        for (const [ux, uy] of [[0, 0], [-q, 0], [q, 0], [0, -q], [0, q]]) g = Math.min(g, sampleMargin(m.__dt, m.w, m.h, mx + ux, my + uy, false));
+      }
+      return Math.max(0, g) * sc;
+    }
+    function margin(x, y) {
+      let g = Infinity;
+      for (let k = 0; k < S.masks.length; k++) g = Math.min(g, maskMargin(S.masks[k], x, y));
+      // a hair less, so floating-point rounding at the edge can never decide it
+      return Math.max(0, g - 1e-6);
     }
 
     // poison never settles where text sits, so the page stays readable however long it is played
@@ -745,12 +850,31 @@
       // coverage at rest depends on the masks, the rows shown and (for the deep echo) the scroll; each
       // row is recomputed only when it is drawn and its key has changed
       const covKey = `${S.rowStart}|${S.scrollY}|${S.masksRev}`;
-      if (!S.kCov || S.kCov.length !== cols * rows) { S.kCov = new Float32Array(cols * rows); S.kCovRow = new Array(rows).fill(null); }
+      if (!S.kCov || S.kCov.length !== cols * rows) {
+        S.kCov = new Float32Array(cols * rows);
+        S.kCov64 = new Float64Array(cols * rows);
+        S.kSafe = new Float64Array(cols * rows);
+        S.rowMinSafe = new Float64Array(rows);
+        S.kCovRow = new Array(rows).fill(null);
+      }
+      const covNew = S.covNew && S.covNew.length === rows ? S.covNew : (S.covNew = new Uint8Array(rows));
+      covNew.fill(0);
       for (let r = 0; r < rows; r++) {
         if (S.kCovRow[r] === covKey || !rowOn(r)) continue;
         const y = (r + S.rowStart) * pitch + pitch / 2;
-        for (let c = 0, i = r * cols; c < cols; c++, i++) S.kCov[i] = cover(c * pitch + pitch / 2, y);
+        let ms = Infinity;
+        for (let c = 0, i = r * cols; c < cols; c++, i++) {
+          const x = c * pitch + pitch / 2;
+          const v = cover(x, y);
+          S.kCov[i] = v;
+          S.kCov64[i] = v;
+          const g = margin(x, y);
+          S.kSafe[i] = g;
+          if (g < ms) ms = g;
+        }
         S.kCovRow[r] = covKey;
+        S.rowMinSafe[r] = ms;
+        covNew[r] = 1;
       }
       const d = S.img.data;
       const gd = S.gimg.data;
@@ -770,26 +894,142 @@
       const lk = S.lock;
       const fr = field[0], fg = field[1], fb = field[2];
       const dr = ink[0] - fr, dg = ink[1] - fg, db = ink[2] - fb;
+
+      /* Only what can have changed is computed. A cell's colour is a function of the field and
+         palettes, the shape coverage under it, the lock box, the lens, the fluid's displacement, the
+         pour's front and its own afterglow. A row is recomputed in full when anything global changed
+         since it was last drawn; otherwise only its cells that the lock box, the lens, the fluid
+         (moving them past their margin), the pour's front band or a fading afterglow touch now or
+         touched then. The rest keep their pixels, which are exactly what recomputing them would
+         give: tools/render_equiv.mjs replays recorded sessions through this and through the full
+         computation and compares every frame byte for byte. */
+      const n = cols * rows;
+      if (!S.rowG || S.rowG.length !== rows || !S.fadeCell || S.fadeCell.length !== n) {
+        S.rowG = new Array(rows).fill(null);
+        S.rowFront = new Float64Array(rows);
+        S.rowLensX = new Float64Array(rows); S.rowLensY = new Float64Array(rows); S.rowLensOn = new Uint8Array(rows);
+        S.rowLock = new Array(rows).fill(null);
+        S.rowLockBox = new Array(rows).fill(null);
+        S.rowFade = new Int32Array(rows);
+        S.rowUsed = new Int32Array(rows);
+        S.fadeCell = new Uint8Array(n);
+        S.usedCell = new Uint8Array(n);
+      }
+      const gsig = `${field}|${ink}|${S.gap}|${S.base}|${S.amp}|${S.rowStart}|${cols}x${rows}|${pitch}|${S.fpal.length}|${S.pal.length}|${S.prevEpoch || 0}|${fl ? fl.at : -1}|${F ? 1 : 0}|${S.isl.length}`;
+      const lsig = lk ? `${lk.x},${lk.y},${lk.w},${lk.h}` : "";
+      const lensX = lens ? lens.x : 0, lensY = lens ? lens.y + S.scrollY : 0; // the lens in page coordinates
+      // the fluid's displacement per cell, once per fluid step instead of every display frame: the
+      // two states each frame blends between, and the largest movement either allows
+      if (F && (!S.dAx || S.dAx.length !== n)) {
+        S.dAx = new Float64Array(n); S.dAy = new Float64Array(n); S.dBx = new Float64Array(n); S.dBy = new Float64Array(n);
+        S.dMax = new Float64Array(n); S.dRowKey = new Array(rows).fill(null); S.rowDMax = new Float64Array(rows);
+      }
+      const dKey = F ? `${F.steps || 0}|${S.rowStart}` : null;
+      if (F && S.fRowKey !== dKey) {
+        if (!S.fRowMax || S.fRowMax.length !== F.h) S.fRowMax = new Float64Array(F.h);
+        for (let j = 0; j < F.h; j++) {
+          let m = 0;
+          for (let k = j * F.w, e = k + F.w; k < e; k++) {
+            const a = Math.abs(F.dx[k]), b = Math.abs(F.dy[k]), c = Math.abs(F.pdx[k]), q = Math.abs(F.pdy[k]);
+            if (a > m) m = a;
+            if (b > m) m = b;
+            if (c > m) m = c;
+            if (q > m) m = q;
+          }
+          S.fRowMax[j] = m;
+        }
+        S.fRowKey = dKey;
+      }
+      // the bound for a row of cells: the two fluid rows its samples read (clamped as bilerp clamps)
+      const fluidBound = (docY) => {
+        let fy = docY / cp - S.rowStart / 2;
+        if (fy < 0) fy = 0; else if (fy > F.h - 1.001) fy = F.h - 1.001;
+        const y0 = fy | 0;
+        const a = S.fRowMax[y0], b = S.fRowMax[y0 + 1];
+        return a > b ? a : b;
+      };
+      // the pour's arrival times per row, smallest and largest, so a row the front is not crossing
+      // is passed over at once
+      if (fl && (S.flRowsFor !== fl || S.flRowsStart !== S.rowStart || !S.rowDMin || S.rowDMin.length !== rows)) {
+        if (!S.rowDMin || S.rowDMin.length !== rows) { S.rowDMin = new Float64Array(rows); S.rowDMaxF = new Float64Array(rows); }
+        for (let r = 0; r < rows; r++) {
+          let lo = Infinity, hi = -Infinity;
+          for (let k = r * cols, e = k + cols; k < e; k++) { const v = fl.dist[k]; if (v < lo) lo = v; if (v > hi) hi = v; }
+          S.rowDMin[r] = lo; S.rowDMaxF[r] = hi;
+        }
+        S.flRowsFor = fl; S.flRowsStart = S.rowStart;
+      }
+      const inBox = (b, x, y) => b !== null && x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h;
       let i = 0;
       let dirty0 = rows, dirty1 = -1;
       for (let r = 0; r < rows; r++) {
         if (!rowOn(r)) { i += cols; continue; }
-        if (r < dirty0) dirty0 = r;
-        dirty1 = r;
         const row = r + S.rowStart;
         const docY = row * pitch + pitch / 2;
         const vy = docY - S.scrollY;
+        const full = S.rowG[r] !== gsig || covNew[r] === 1;
+        const lockOld = S.rowLockBox[r];
+        const lensOnOld = S.rowLensOn[r], lensXOld = S.rowLensX[r], lensYOld = S.rowLensY[r];
+        const frontOld = S.rowFront[r];
+        let chkLock = false, chkLens = false, chkFluid = false, chkFlood = false;
+        if (!full) {
+          if (S.rowLock[r] !== lsig) {
+            chkLock = (lk !== null && docY > lk.y && docY < lk.y + lk.h) || (lockOld !== null && docY > lockOld.y && docY < lockOld.y + lockOld.h);
+          }
+          if (lens && Math.abs(docY - lensY) < R + pitch) chkLens = true;
+          if (lensOnOld && Math.abs(docY - lensYOld) < R + pitch) chkLens = true;
+          if (S.rowUsed[r] > 0) chkFluid = true;
+          // the fluid can only change cells it moves past their margin
+          if (F && !(fluidBound(docY) < S.rowMinSafe[r])) chkFluid = true;
+          if (fl && S.rowDMaxF[r] > frontOld - WAKE && S.rowDMin[r] <= front) chkFlood = true;
+          if (!chkLock && !chkLens && !chkFluid && !chkFlood && S.rowFade[r] === 0) {
+            // nothing touches this row: its pixels stand
+            S.rowFront[r] = front;
+            S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
+            S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
+            i += cols;
+            continue;
+          }
+        }
+        if (F && S.dRowKey[r] !== dKey) {
+          let mx = 0;
+          for (let c = 0, k = r * cols; c < cols; c++, k++) {
+            const docX = c * pitch + pitch / 2;
+            const fx = docX / cp, fy = docY / cp - S.rowStart / 2;
+            const ax = bilerp(F.pdx, F.w, F.h, fx, fy), ay = bilerp(F.pdy, F.w, F.h, fx, fy);
+            const bx = bilerp(F.dx, F.w, F.h, fx, fy), by = bilerp(F.dy, F.w, F.h, fx, fy);
+            S.dAx[k] = ax; S.dAy[k] = ay; S.dBx[k] = bx; S.dBy[k] = by;
+            const m = Math.max(Math.abs(ax), Math.abs(ay), Math.abs(bx), Math.abs(by));
+            S.dMax[k] = m;
+            if (m > mx) mx = m;
+          }
+          S.dRowKey[r] = dKey;
+          S.rowDMax[r] = mx;
+        }
+        let rowChanged = false;
+        const R1 = (R + 1) * (R + 1);
         for (let c = 0; c < cols; c++, i++) {
           const docX = c * pitch + pitch / 2;
+          if (!full) {
+            // is anything that feeds this cell different from when it was last drawn?
+            let need = S.fadeCell[i] === 1;
+            if (!need && chkLock) need = inBox(lk, docX, docY) || inBox(lockOld, docX, docY);
+            if (!need && chkLens) {
+              const ex = docX - lensX, ey = docY - lensY, ox = docX - lensXOld, oy = docY - lensYOld;
+              need = (lens !== null && ex * ex + ey * ey < R1) || (lensOnOld === 1 && ox * ox + oy * oy < R1);
+            }
+            if (!need && chkFluid) need = S.usedCell[i] === 1 || (F !== null && !(S.dMax[i] < S.kSafe[i]));
+            if (!need && chkFlood) { const dc = fl.dist[i]; need = dc > frontOld - WAKE && dc <= front; }
+            if (!need) continue;
+          }
+          rowChanged = true;
           // where this cell samples the image from: its own place, or wherever the flow carried it
           let px = docX, py = docY;
           if (F) {
-            const fx = docX / cp, fy = docY / cp - S.rowStart / 2;
-            const ax = bilerp(F.pdx, F.w, F.h, fx, fy), ay = bilerp(F.pdy, F.w, F.h, fx, fy);
-            px -= ax + (bilerp(F.dx, F.w, F.h, fx, fy) - ax) * fa;
-            py -= ay + (bilerp(F.dy, F.w, F.h, fx, fy) - ay) * fa;
+            const ax = S.dAx[i], ay = S.dAy[i];
+            px -= ax + (S.dBx[i] - ax) * fa;
+            py -= ay + (S.dBy[i] - ay) * fa;
           }
-          // which field this cell still shows: the old one until the pour reaches it
           // which field this cell shows: the one it showed before, until the pour reaches it
           let old = null;
           let wake = 0;
@@ -808,6 +1048,7 @@
           let tr, tg, tb;
           let dist = 1e9;
           if (lens) dist = Math.hypot(docX - lens.x, vy - lens.y);
+          let usedCover = 0;
           if (dist < R) {
             // the glass: cells near the centre sample from closer in (magnified), and the colour
             // channels separate along the radius, strongest halfway out
@@ -822,10 +1063,15 @@
             tg = cover(sx, sy);
             tb = cover(sx - ux * ch, sy - uy * ch);
             bg += 0.05 * f;
+          } else if (F) {
+            // moved by the flow: within its margin it shows exactly what it shows at rest
+            if (S.dMax[i] < S.kSafe[i]) tr = tg = tb = S.kCov64[i];
+            else { tr = tg = tb = cover(px, py); usedCover = 1; }
           } else {
             // at rest a cell samples its own place: what the name and echo cover there is cached
-            tr = tg = tb = F ? cover(px, py) : S.kCov[i];
+            tr = tg = tb = S.kCov[i];
           }
+          S.usedCell[i] = usedCover;
           // lit cells vary a little too, like LEDs from different batches
           const lv = S.kLv[i];
           tr *= lv; tg *= lv; tb *= lv;
@@ -835,6 +1081,7 @@
           // afterglow: a lit cell fades over a few frames instead of switching off at once
           const j = i * 3;
           const pr = S.prev[j] - decay, pg = S.prev[j + 1] - decay, pb = S.prev[j + 2] - decay;
+          S.fadeCell[i] = pr > vr || pg > vg || pb > vb ? 1 : 0;
           if (pr > vr) vr = pr;
           if (pg > vg) vg = pg;
           if (pb > vb) vb = pb;
@@ -863,6 +1110,19 @@
             gd[o] = gp[0]; gd[o + 1] = gp[1]; gd[o + 2] = gp[2]; gd[o + 3] = 255;
           }
         }
+        // the row's state as drawn, for the next frame's decision
+        let fades = 0, used = 0;
+        for (let k = r * cols, e = k + cols; k < e; k++) { fades += S.fadeCell[k]; used += S.usedCell[k]; }
+        S.rowFade[r] = fades;
+        S.rowUsed[r] = used;
+        S.rowG[r] = gsig;
+        S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
+        S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
+        S.rowFront[r] = front;
+        if (rowChanged) {
+          if (r < dirty0) dirty0 = r;
+          dirty1 = r;
+        }
       }
       // upload only the band of rows drawn this frame (the sweep can wrap; then it is the whole panel)
       const dh = dirty1 - dirty0 + 1;
@@ -880,6 +1140,7 @@
       notify({ type: "committed", rowStart: S.rowStart });
     }
 
+    const RENDER_BUDGET = 0.5; // of one core
     function tick(now) {
       timed("frame", () => tick0(now));
     }
@@ -939,6 +1200,13 @@
     function tick0(now) {
       S.queued = false;
       if (!S.visible || !S.img) return;
+      /* A CPU budget: the wall never takes more than half of one core. It measures what its frames
+         cost and, when drawing every display frame would exceed that (a 540 Hz screen, a slow CPU),
+         draws every other frame or fewer. Every pixel is a function of time, so a skipped display
+         frame only lowers the frame rate; nothing is ever shown late or wrong, and the page's own
+         threads always keep the other half and more. */
+      const minGap = S.renderEma ? S.renderEma / RENDER_BUDGET : 0;
+      if (S.lastTick && now - S.lastTick < minGap - 0.5) { queue(); return; }
       // real time since the last drawn frame (a fresh start counts as one 60 Hz frame)
       S.frameDt = S.lastTick && now - S.lastTick < 250 ? now - S.lastTick : FLUID_DT;
       S.lastTick = now;
@@ -948,7 +1216,10 @@
         S.cellOld.fill(0);
         S.fpal = [];
       }
+      const t0 = performance.now();
       render(now);
+      const ms = performance.now() - t0;
+      S.renderEma = S.renderEma ? S.renderEma * 0.9 + ms * 0.1 : ms;
       // keep drawing only while something moves: the fluid, a pour, the lens, or fading trails
       const busy = (S.fluid && S.fluid.active) || S.flood || now - S.lastChange < 450;
       if (busy) queue();
@@ -970,6 +1241,8 @@
       return r;
     }
     function handle(m) {
+      // with ?debug&rec every message is recorded with its time, for tools/render_equiv.mjs
+      if (S.rec && m.type !== "dumpRec" && m.type !== "pourResult" && m.type !== "motionPort") S.rec.push({ t: performance.now(), m });
       return timed("message " + m.type, () => handle0(m));
     }
 
@@ -999,6 +1272,7 @@
       switch (m.type) {
         case "init":
           S.debug = !!m.debug;
+          S.rec = m.rec ? [] : null;
           S.canvas = m.canvas;
           S.gapsCanvas = m.gaps || null;
           // transparent until its first frame, so the page background shows through, never black
@@ -1012,6 +1286,9 @@
           break;
         case "motionPort":
           S.motionPort = m.port;
+          break;
+        case "dumpRec":
+          notify({ type: "rec", log: S.rec || [] });
           break;
         case "field": {
           S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap };
@@ -1035,6 +1312,7 @@
           S.amp = m.amp;
           S.glow = m.glow;
           if (S.prev) S.prev.fill(0);
+          S.prevEpoch = (S.prevEpoch || 0) + 1;
           S.pending = null;
           S.pendingMsg = m;
           if (m.cut && !S.reduce) startFlood(now, m.texts);
