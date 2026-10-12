@@ -82,7 +82,7 @@ function run(path, hz) {
       busy += Number(process.hrtime.bigint() - t0) / 1e6;
       const h = crypto.createHash("sha1");
       for (const k of ["cells", "bloom", "gaps"]) h.update(cv[k].fb);
-      frames.push({ t, h: h.digest("hex"), fb: hz <= 60 ? null : null });
+      frames.push({ t, h: h.digest("hex"), snap: process.env.DIAG ? { cells: cv.cells.fb.slice(), bloom: cv.bloom.fb.slice(), gaps: cv.gaps.fb.slice(), w: cv.cells._w } : null });
     } else frames.push({ t, h: null });
   }
   return { frames, busy, cv, sb };
@@ -109,7 +109,28 @@ for (const hz of rates) {
   for (let i = 0; i < a.frames.length; i++) {
     if (a.frames[i].h) la = a.frames[i].h;
     if (b.frames[i] && b.frames[i].h) lb = b.frames[i].h;
-    if (la !== lb) { diff++; if (first === null) first = Math.round(a.frames[i].t - recs[0].t); }
+    if (la !== lb) {
+      diff++;
+      if (first === null) {
+        first = Math.round(a.frames[i].t - recs[0].t);
+        // which canvas, how many pixels, where
+        const fa = [...a.frames.slice(0, i + 1)].reverse().find((f) => f.snap), fb = [...b.frames.slice(0, i + 1)].reverse().find((f) => f.snap);
+        if (fa && fb) {
+          for (const k of ["cells", "bloom", "gaps"]) {
+            const A = fa.snap[k], B = fb.snap[k], w = fa.snap.w;
+            let nd = 0, x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, ex = null;
+            for (let q = 0; q < A.length; q += 4) {
+              if (A[q] !== B[q] || A[q + 1] !== B[q + 1] || A[q + 2] !== B[q + 2] || A[q + 3] !== B[q + 3]) {
+                nd++; const px = (q / 4) % w, py = Math.floor(q / 4 / w);
+                x0 = Math.min(x0, px); x1 = Math.max(x1, px); y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+                if (!ex) ex = `(${px},${py}) old ${[...A.slice(q, q + 4)]} new ${[...B.slice(q, q + 4)]}`;
+              }
+            }
+            if (nd) console.log(`  first difference at +${first} ms: ${k}: ${nd} pixels in x ${x0}..${x1}, y ${y0}..${y1}; e.g. ${ex}`);
+          }
+        }
+      }
+    }
   }
   if (diff) allSame = false;
   console.log(`${hz} Hz: frames ${a.frames.length}, drawn old ${drawnA} new ${drawnB}; frames whose picture differs: ${diff}${first !== null ? ` (first at +${first} ms)` : ""}; render time old ${a.busy.toFixed(0)} ms, new ${b.busy.toFixed(0)} ms (${(a.busy / b.busy).toFixed(2)}x)`);

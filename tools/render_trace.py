@@ -6,6 +6,7 @@ import websocket
 
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 sw = "--sw" in sys.argv
+headless = "--headless" in sys.argv
 profile = pathlib.Path(tempfile.mkdtemp(prefix="xylz-tprobe-"))
 flags = [chrome, "--no-first-run", "--no-default-browser-check", "--remote-allow-origins=*", "--remote-debugging-port=0",
          f"--user-data-dir={profile}", "--window-position=-2400,-2400", "--window-size=1456,1020",
@@ -13,6 +14,9 @@ flags = [chrome, "--no-first-run", "--no-default-browser-check", "--remote-allow
          "--disable-features=CalculateNativeWinOcclusion", "about:blank"]
 if sw:
     flags.insert(1, "--disable-gpu")
+if headless:
+    flags = [f for f in flags if not f.startswith("--window-")]
+    flags.insert(1, "--headless=new")
 proc = subprocess.Popen(flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 events = []
 try:
@@ -61,13 +65,20 @@ try:
         raise TimeoutError(m)
 
     call("Page.enable")
+    if headless:
+        call("Emulation.setDeviceMetricsOverride", {"width": 1456, "height": 933, "deviceScaleFactor": 1, "mobile": False})
     call("Page.navigate", {"url": "http://localhost:8765/"})
     pours = "--pours" in sys.argv
     time.sleep(2)
     print("viewport:", call("Runtime.evaluate", {"expression": "[innerWidth, innerHeight, devicePixelRatio]", "returnByValue": True})["result"]["value"])
     call("Tracing.start", {"traceConfig": {"includedCategories": ["devtools.timeline", "disabled-by-default-devtools.timeline", "toplevel", "v8.execute", "blink", "gpu", "cc", "viz"]},
                            "transferMode": "ReportEvents"})
-    if pours:
+    if "--resize" in sys.argv:
+        for w in (1300, 1100, 1456):
+            call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 400, "y": 300, "pointerType": "mouse"})
+            call("Emulation.setDeviceMetricsOverride", {"width": w, "height": 933, "deviceScaleFactor": 1, "mobile": False})
+            time.sleep(0.8)
+    elif pours:
         R = json.loads(call("Runtime.evaluate", {"expression": "JSON.stringify([...document.querySelectorAll('.targets .target')].map(e => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }))", "returnByValue": True})["result"]["value"])
         x, y = 700, 400
         for t in [2, 3]:

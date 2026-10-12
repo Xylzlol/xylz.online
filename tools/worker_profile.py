@@ -7,6 +7,8 @@ import websocket
 
 chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 sw = "--sw" in sys.argv
+headless = "--headless" in sys.argv
+URL = sys.argv[sys.argv.index("--url") + 1] if "--url" in sys.argv else "http://localhost:8765/"
 profile = pathlib.Path(tempfile.mkdtemp(prefix="xylz-tprobe-"))
 flags = [chrome, "--no-first-run", "--no-default-browser-check", "--remote-allow-origins=*", "--remote-debugging-port=0",
          f"--user-data-dir={profile}", "--window-position=-2400,-2400", "--window-size=1456,1020",
@@ -14,7 +16,20 @@ flags = [chrome, "--no-first-run", "--no-default-browser-check", "--remote-allow
          "--disable-features=CalculateNativeWinOcclusion", "about:blank"]
 if sw:
     flags.insert(1, "--disable-gpu")
+if headless:
+    flags = [f for f in flags if not f.startswith("--window-")]
+    flags.insert(1, "--headless=new")
 proc = subprocess.Popen(flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+import psutil
+CPUS = [int(x) for x in sys.argv[sys.argv.index("--cpus") + 1].split(",")] if "--cpus" in sys.argv else None
+def pin():
+    if not CPUS: return
+    root = psutil.Process(proc.pid)
+    for q in [root] + root.children(recursive=True):
+        try:
+            q.cpu_affinity(CPUS); q.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
 events = []
 try:
     pf = profile / "DevToolsActivePort"
@@ -70,8 +85,11 @@ try:
         pass
     call("Page.enable")
     call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True})
-    call("Page.navigate", {"url": "http://localhost:8765/"})
+    if headless:
+        call("Emulation.setDeviceMetricsOverride", {"width": 1456, "height": 933, "deviceScaleFactor": 1, "mobile": False})
+    call("Page.navigate", {"url": URL})
     time.sleep(2.5)
+    pin()
     sess = [s for s in list(attached)]
     for sid in sess:
         call("Profiler.enable", session=sid); call("Profiler.setSamplingInterval", {"interval": 200}, session=sid); call("Profiler.start", session=sid)
@@ -99,8 +117,18 @@ for name, prof in profs.items():
     for nid, us in dt.items():
         cf = nodes[nid]["callFrame"]
         selfc[f"{cf['functionName'] or '(anon)'} {cf['url'].split('/')[-1].split('?')[0]}:{cf['lineNumber'] + 1}"] += us
-    tot = sum(dt.values()) - selfc.get("(idle) :0", 0) - sum(v for k, v in selfc.items() if k.startswith("(idle)") or k.startswith("(program)"))
+    tot = sum(v for k, v in selfc.items() if not k.startswith("(idle)"))
     print(f"== {name}: busy {tot / 1000:.0f} ms of {(prof['endTime'] - prof['startTime']) / 1000:.0f} ms")
+    if "--lines" in sys.argv and "wall" in name:
+        src = urllib.request.urlopen(URL.split("?")[0].rstrip("/") + "/wall.js").read().decode("utf-8").splitlines()
+        lines = collections.Counter()
+        for nd in prof["nodes"]:
+            if nd["callFrame"]["functionName"] in ("render", "tick0", "cover", "maskAt"):
+                tot = sum(t["ticks"] for t in nd.get("positionTicks", [])) or 1
+                for t in nd.get("positionTicks", []):
+                    lines[t["line"]] += dt[nd["id"]] * t["ticks"] / tot
+        for ln, us in lines.most_common(18):
+            print(f"      {us / 1000:7.1f} ms  {ln}: {src[ln - 1].strip()[:100]}")
     for k, v in selfc.most_common(14):
         if not k.startswith("(idle)"):
             print(f"   {v / 1000:7.1f}  {k}")

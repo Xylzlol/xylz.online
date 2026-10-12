@@ -158,11 +158,16 @@ body::before {
 }
 :root[data-field="black"] .wall-gloss { opacity: 0.7; }
 
-/* lit cells bleed light behind the panel; only where the ink is light */
+/* lit cells bleed light behind the panel, in the fields that glow. Each LED carries its own field's
+   glow (wall.js), so the glow turns with the pour, cell by cell, not the whole page at once: this
+   layer lies under the gaps, holding each LED's light (colour x its field's glow), and the gap layer
+   lets it through only around LEDs whose field glows. Shown only while some LED glows, so nothing
+   is blurred for nothing. */
 .wall-bloom {
   filter: blur(10px);
-  opacity: var(--glow);
+  display: none;
 }
+.wall.glow-on .wall-bloom { display: block; }
 .wall-on body::before { display: none; }
 /* with the wall on, the gaps between cells are drawn by the wall itself (the wall-gaps layer), so they
    pour with the cells; the page background only shows outside the panel */

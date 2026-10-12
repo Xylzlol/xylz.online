@@ -1073,13 +1073,14 @@
     gaps.className = "wall-gaps";
     const gloss = document.createElement("div");
     gloss.className = "wall-gloss";
-    host.append(gaps, bloom, cells, gloss);
+    // the glow lies under the gaps, which let it through only around LEDs whose field glows
+    host.append(bloom, gaps, cells, gloss);
 
     let post = null;
     let givePort = null; // hands the wall a port to the gaze worker, for its change map
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013n18");
+        const worker = new Worker("wall-worker.js?v=20261013n31");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
@@ -1123,6 +1124,7 @@
       if (frameLog && m.type === "slow") (window.__wallSlow = window.__wallSlow || []).push(m);
       if (m.type === "arrivals") { arrived(m); return; }
       if (m.type === "rec") { window.__wallRec = m.log; return; }
+      if (m.type === "glow") { host.classList.toggle("glow-on", m.on); return; }
       if (m.type !== "committed" || m.rowStart === shown) return;
       shown = m.rowStart;
       host.style.setProperty("--top", `${shown * wallPitch}px`);
@@ -1259,7 +1261,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013n18");
+    const gw = new Worker("gaze-worker.js?v=20261013n31");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow(), dyn: /[?&]dyn(?:[=&]|$)/.test(location.search) }, [oc]);
@@ -1573,7 +1575,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013n18", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n31", { type: "module" });
       } catch (err) {
         return;
       }

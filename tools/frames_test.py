@@ -24,10 +24,18 @@ SW = "--gpu" not in sys.argv
 out_json = sys.argv[sys.argv.index("--json") + 1] if "--json" in sys.argv else None
 CSS = sys.argv[sys.argv.index("--css") + 1] if "--css" in sys.argv else ""   # extra CSS, for cost experiments
 QUICK = "--quick" in sys.argv
+NOLEAK = "--noleak" in sys.argv  # every scenario, but not the 60 s leak check
 # a slower machine: --cores 4 pins every process of this browser to 4 logical CPUs (one per physical
 # core), --throttle N slows the renderer's CPU N times (Chrome's own throttling; checked below on the
 # page and in a worker)
 CORES = int(sys.argv[sys.argv.index("--cores") + 1]) if "--cores" in sys.argv else 0
+# --headless: no window at all (nothing on screen, no focus taken); headless Chrome still renders with
+# the real GPU (checked from its feature status), at a 60 Hz begin-frame rate
+HEADLESS = "--headless" in sys.argv
+# --cpus a,b,c: pin to these logical CPUs; --low: below-normal priority (a game running alongside
+# keeps its share; the numbers then describe a busy machine)
+CPULIST = [int(x) for x in sys.argv[sys.argv.index("--cpus") + 1].split(",")] if "--cpus" in sys.argv else None
+LOW = "--low" in sys.argv
 THROTTLE = float(sys.argv[sys.argv.index("--throttle") + 1]) if "--throttle" in sys.argv else 1   # load, stir, pours, reading only; no leak check
 URL = sys.argv[sys.argv.index("--url") + 1] if "--url" in sys.argv else "http://localhost:8765/?debug"
 profile = pathlib.Path(tempfile.mkdtemp(prefix="xylz-frames-"))
@@ -37,18 +45,23 @@ flags = [chrome, "--no-first-run", "--no-default-browser-check", "--remote-allow
          "--disable-features=CalculateNativeWinOcclusion", "--disable-extensions", "about:blank"]
 if SW:
     flags.insert(1, "--disable-gpu")
+if HEADLESS:
+    flags = [f for f in flags if not f.startswith("--window-")]
+    flags.insert(1, "--headless=new")
 proc = subprocess.Popen(flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-CPUS = list(range(0, 2 * CORES, 2)) if CORES else None
+CPUS = CPULIST or (list(range(0, 2 * CORES, 2)) if CORES else None)
 
 
 def pin():
-    if not CPUS:
+    if not CPUS and not LOW:
         return
     try:
         root = psutil.Process(proc.pid)
         for p in [root] + root.children(recursive=True):
             try:
                 p.cpu_affinity(CPUS)
+                if LOW:
+                    p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
     except psutil.NoSuchProcess:
@@ -83,8 +96,11 @@ def tree():
 try:
     pf = profile / "DevToolsActivePort"
     for _ in range(150):
-        if pf.exists() and pf.read_text().strip():
-            break
+        try:
+            if pf.exists() and pf.read_text().strip():
+                break
+        except PermissionError:  # Chrome is still writing it
+            pass
         time.sleep(0.1)
     port, bpath = pf.read_text().splitlines()[:2]
     bws = websocket.create_connection(f"ws://127.0.0.1:{port}{bpath}", timeout=60)
@@ -174,6 +190,8 @@ try:
     if THROTTLE > 1:
         call("Emulation.setCPUThrottlingRate", {"rate": THROTTLE})
     call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True})
+    if HEADLESS:
+        call("Emulation.setDeviceMetricsOverride", {"width": 1456, "height": 933, "deviceScaleFactor": 1, "mobile": False})
     call("Page.addScriptToEvaluateOnNewDocument", {"source": LOAF})
     if CSS:
         call("Page.addScriptToEvaluateOnNewDocument", {"source": "addEventListener('DOMContentLoaded', () => { const s = document.createElement('style'); s.textContent = " + json.dumps(CSS) + "; document.head.append(s); });"})
@@ -219,6 +237,14 @@ try:
     end()
     # 2. stirring the name: the pointer sweeps across the letters
     begin("stir name")
+    for k in range(180):
+        move(200 + 900 * (0.5 + 0.5 * math.sin(k / 9)), 260 + 160 * math.sin(k / 13)); time.sleep(0.016)
+    time.sleep(0.8)
+    end()
+    # the same again once the fluid has settled: is a spike in the first stir only the JIT's first run
+    # through those paths?
+    time.sleep(2.5)
+    begin("stir again")
     for k in range(180):
         move(200 + 900 * (0.5 + 0.5 * math.sin(k / 9)), 260 + 160 * math.sin(k / 13)); time.sleep(0.016)
     time.sleep(0.8)
@@ -270,21 +296,33 @@ try:
         end()
         # 8. resize while animating
         begin("resize")
-        win = bcall("Browser.getWindowForTarget", {"targetId": tgt["id"]})["windowId"]
+        if not HEADLESS:
+            win = bcall("Browser.getWindowForTarget", {"targetId": tgt["id"]})["windowId"]
         for w in (1300, 1100, 1456):
-            move(400, 300); bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"width": w, "height": 1020}}); time.sleep(0.7)
+            move(400, 300)
+            if HEADLESS:
+                call("Emulation.setDeviceMetricsOverride", {"width": w, "height": 933, "deviceScaleFactor": 1, "mobile": False})
+            else:
+                bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"width": w, "height": 1020}})
+            time.sleep(0.7)
         end()
         # 9. minimise and restore
         begin("restore")
-        bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "minimized"}}); time.sleep(1.0)
-        bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "normal"}}); time.sleep(0.2)
+        if HEADLESS:
+            # hidden and back: the page is frozen, as in a background tab, then made active again
+            call("Page.setWebLifecycleState", {"state": "frozen"}); time.sleep(1.0)
+            call("Page.setWebLifecycleState", {"state": "active"}); time.sleep(0.2)
+        else:
+            bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "minimized"}}); time.sleep(1.0)
+            bcall("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": "normal"}}); time.sleep(0.2)
         move(500, 300); move(600, 320); time.sleep(1.5)
         end()
     mem.append(memory("after scenarios"))
     frames = js("window.__wallFrames || []")
+    slowlog = js("window.__wallSlow || []")
     loaf = js("window.__loaf || []")
     call("Tracing.end"); done.wait(120)
-    if not QUICK:
+    if not QUICK and not NOLEAK:
         # 10. leak check: 60 s more of stirring and pours, untraced
         for r in range(4):
             for target in [2, 3, 1, 0]:
@@ -337,9 +375,14 @@ for e in events:
 vsync = sorted(ivals)[len(ivals) // 2] if ivals else (vsync_iv[len(vsync_iv) // 10] if vsync_iv else 16667)
 page_lth = collections.Counter(((e.get("args") or {}).get("frame_reporter") or {}).get("layer_tree_host_id")
                                for e in events if e.get("name") == "PipelineReporter").most_common(1)[0][0]
+# the wall worker's own frames: its thread is the one whose animation frames call into wall.js;
+# tdur is the thread's CPU time in each frame (wall-clock time also counts any preemption)
+wall_tids = {(e["pid"], e["tid"]) for e in events if e.get("name") == "FunctionCall" and "wall.js" in str(((e.get("args") or {}).get("data") or {}).get("url", ""))}
+waf = [e for e in events if e.get("name") == "FireAnimationFrame" and e.get("ph") == "X" and (e["pid"], e["tid"]) in wall_tids]
 print(f"trace buffer peak {bufmax[0] * 100:.0f}% full{'  (OVERFLOW: later events lost)' if bufmax[0] >= 0.99 else ''}")
+print(f"{'headless, ' if HEADLESS else ''}{'low priority, ' if LOW else ''}url {URL}")
 print(f"mode: {'hardware acceleration OFF' if SW else 'GPU'}  feature status {status}  viewport {vp}  vsync ~{vsync / 1000:.1f} ms  cores {CPUS or 'all'}  throttle x{THROTTLE}  busy-loop page/worker {slow}")
-print(f"{'scenario':20s} {'drawn':>6s} {'fps':>5s} {'>25ms':>6s} {'worst':>7s} {'pageDrop':>8s} {'wallGap':>8s} {'LoAF>50':>8s}  cpu% (renderer/gpu/browser)")
+print(f"{'scenario':20s} {'drawn':>6s} {'fps':>5s} {'>25ms':>6s} {'worst':>7s} {'pageDrop':>8s} {'late':>10s} {'work>8':>10s} {'LoAF>50':>8s}  cpu% (renderer/gpu/browser)")
 rows = []
 for s in scen:
     a, b = marks.get("S:" + s["name"]), marks.get("E:" + s["name"])
@@ -359,14 +402,26 @@ for s in scen:
                 and ((e.get("args") or {}).get("frame_reporter") or {}).get("layer_tree_host_id") == page_lth
                 and ((e.get("args") or {}).get("frame_reporter") or {}).get("state") == "STATE_DROPPED")
     wgaps = [q - p for p, q in zip(wf, wf[1:]) if q - p < 400]
+    # the wall's own stalls: frames that came over 34 ms after they were asked for, and work over 8 ms
+    lates = [w["ms"] for w in slowlog if w["what"] == "late frame" and s["t0"] <= w["at"] <= s["t1"]]
+    works = [w["ms"] for w in slowlog if w["what"] != "late frame" and s["t0"] <= w["at"] <= s["t1"]]
     lo = [l for l in loaf if s["t0"] <= l["t"] <= s["t1"] and l["d"] > 50]
+    cpu = sorted(e.get("tdur", e.get("dur", 0)) / 1000 for e in waf if a <= e["ts"] <= b)
+    wallc = sorted(e.get("dur", 0) / 1000 for e in waf if a <= e["ts"] <= b)
+    row_cpu = (f"wall frame cpu p50 {cpu[len(cpu) // 2]:.2f} p95 {cpu[int(len(cpu) * .95)]:.2f} max {cpu[-1]:.2f} ms (wall-clock max {wallc[-1]:.2f}), {len(cpu)} frames, {sum(cpu):.0f} ms total" if cpu else "")
     row = {"scenario": s["name"], "drawn": len(d), "fps": fps, "gaps_over_25ms": drops, "worst_ms": round(worst, 1), "page_dropped": pdrop,
-           "wall_worst_gap_ms": round(max(wgaps), 1) if wgaps else None, "loaf_over_50": [(round(l["d"]), l["scripts"][:3]) for l in lo], "cpu_pct": s["cpu_pct"]}
+           "wall_worst_gap_ms": round(max(wgaps), 1) if wgaps else None, "wall_late": lates, "wall_slow_work": works, "loaf_over_50": [(round(l["d"]), l["scripts"][:3]) for l in lo], "cpu_pct": s["cpu_pct"]}
     rows.append(row)
     c = s["cpu_pct"]
-    print(f"{s['name']:20s} {len(d):6d} {fps:5d} {drops:6d} {worst:7.1f} {pdrop:8d} {str(row['wall_worst_gap_ms']):>8s} {len(lo):8d}  {c.get('renderer', 0)}/{c.get('gpu', 0)}/{c.get('browser', 0)}")
+    fmt = lambda a: f"{len(a)}/{max(a) if a else 0}"
+    print(f"{s['name']:20s} {len(d):6d} {fps:5d} {drops:6d} {worst:7.1f} {pdrop:8d} {fmt(lates):>10s} {fmt(works):>10s} {len(lo):8d}  {c.get('renderer', 0)}/{c.get('gpu', 0)}/{c.get('browser', 0)}")
+    if row_cpu:
+        print(f"{'':22s}{row_cpu}")
     for l in lo[:3]:
         print(f"{'':22s}LoAF {round(l['d'])} ms: {l['scripts'][:3]}")
+    if "--why" in sys.argv:
+        for w in sorted([w for w in slowlog if w["what"].startswith("frame:") and s["t0"] <= w["at"] <= s["t1"]], key=lambda w: -w["ms"])[:3]:
+            print(f"{'':22s}slow {w['ms']} ms: {w['what']}")
 print("\nmemory (private MB by process kind; JS heap MB by context):")
 for m in mem:
     print(f"  {m['label']:18s} total {m['total_mb']:7.1f}  {m['uss_mb']}  heaps {m['js_heap_mb']}")

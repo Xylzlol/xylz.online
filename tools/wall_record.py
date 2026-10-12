@@ -49,6 +49,50 @@ try:
     call("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False})
     call("Page.navigate", {"url": "http://localhost:8765/?debug&rec"})
     time.sleep(2.0)
+    if "--stress" in sys.argv:
+        # the hard cases: pours interrupting pours, a scroll and a resize mid-pour, plain cuts with
+        # reduced motion, and back
+        R = json.loads(js("JSON.stringify([...document.querySelectorAll('.targets .target')].map(e => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }))"))
+        x, y = 700, 400
+        for t in [2, 3, 1, 0, 2, 3, 2]:  # settle just long enough to commit, then move on
+            tx, ty = R[t]
+            for k in range(1, 16):
+                move(x + (tx - x) * k / 15, y + (ty - y) * k / 15); time.sleep(0.012)
+            x, y = tx, ty
+            time.sleep(0.35)
+        for k in range(8):
+            wheel(x, y, 120); time.sleep(0.03)
+        call("Emulation.setDeviceMetricsOverride", {"width": 1280, "height": 860, "deviceScaleFactor": 1, "mobile": False})
+        time.sleep(0.6)
+        js("scrollTo(0, 0), 1"); time.sleep(0.4)
+        R = json.loads(js("JSON.stringify([...document.querySelectorAll('.targets .target')].map(e => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }))"))
+        call("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "reduce"}]})
+        time.sleep(0.4)
+        for t in [3, 1, 2]:
+            tx, ty = R[t]
+            for k in range(1, 16):
+                move(x + (tx - x) * k / 15, y + (ty - y) * k / 15); time.sleep(0.012)
+            x, y = tx, ty
+            time.sleep(0.6)
+        call("Emulation.setEmulatedMedia", {"features": [{"name": "prefers-reduced-motion", "value": "no-preference"}]})
+        time.sleep(0.4)
+        for t in [0, 2]:
+            tx, ty = R[t]
+            for k in range(1, 16):
+                move(x + (tx - x) * k / 15, y + (ty - y) * k / 15); time.sleep(0.012)
+            x, y = tx, ty
+            time.sleep(1.3)
+        for k in range(100):
+            move(200 + 900 * (0.5 + 0.5 * math.sin(k / 9)), 260 + 160 * math.sin(k / 13)); time.sleep(0.016)
+        time.sleep(0.8)
+        js("window.__dumpWallRec(), 1")
+        time.sleep(0.5)
+        log = js("""JSON.stringify(window.__wallRec, (k, v) => ArrayBuffer.isView(v) ? { __ta: v.constructor.name, d: Array.from(v) } : v)""")
+        out.write_text(log)
+        recs = json.loads(log)
+        import collections
+        print(len(recs), "messages over", round((recs[-1]["t"] - recs[0]["t"]) / 1000, 1), "s:", dict(collections.Counter(r["m"]["type"] for r in recs)))
+        raise SystemExit(0)
     for k in range(150):  # stir the name
         move(200 + 900 * (0.5 + 0.5 * math.sin(k / 9)), 260 + 160 * math.sin(k / 13)); time.sleep(0.016)
     time.sleep(0.6)
@@ -83,6 +127,8 @@ try:
     js("window.__dumpWallRec(), 1")
     time.sleep(0.5)
     log = js("""JSON.stringify(window.__wallRec, (k, v) => ArrayBuffer.isView(v) ? { __ta: v.constructor.name, d: Array.from(v) } : v)""")
+except SystemExit:
+    pass
 finally:
     proc.terminate()
     try:
@@ -90,6 +136,8 @@ finally:
     except Exception:
         pass
     shutil.rmtree(profile, ignore_errors=True)  # never leave the profile in %TEMP%
+if "--stress" in sys.argv:
+    raise SystemExit(0)
 out.write_text(log)
 recs = json.loads(log)
 import collections

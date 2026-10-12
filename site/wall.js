@@ -302,17 +302,22 @@
       }
       return dt[iv * w + iu] - 1 + Math.min(edge(u), edge(v));
     }
+    function maskDT(m) {
+      if (m.cells) return chess(m.cells, m.cols, m.rows);
+      if (!m.data) return null;
+      const on = new Uint8Array(m.w * m.h);
+      for (let k = 0; k < on.length; k++) on[k] = m.data[k] > 127 ? 1 : 0;
+      return chess(on, m.w, m.h);
+    }
     function maskMargin(m, x, y) {
-      if (m.cells) {
-        if (!m.__dt) m.__dt = chess(m.cells, m.cols, m.rows);
-        return sampleMargin(m.__dt, m.cols, m.rows, x / S.pitch - m.c0, y / S.pitch - m.r0, true) * S.pitch;
-      }
-      if (!m.data) return 0;
       if (!m.__dt) {
-        const on = new Uint8Array(m.w * m.h);
-        for (let k = 0; k < on.length; k++) on[k] = m.data[k] > 127 ? 1 : 0;
-        m.__dt = chess(on, m.w, m.h);
+        // with a pour thread the maps are built there (tens of ms for the deep echo, never on the
+        // drawing thread); without one, here, once per masks message
+        if (pourer) return 0;
+        m.__dt = maskDT(m);
+        if (!m.__dt) return 0;
       }
+      if (m.cells) return sampleMargin(m.__dt, m.cols, m.rows, x / S.pitch - m.c0, y / S.pitch - m.r0, true) * S.pitch;
       const sc = m.scale;
       const mx = (x - m.x) / sc;
       const my = (y - m.y - S.scrollY * (1 - m.depth)) / sc;
@@ -320,6 +325,16 @@
       // the bounds test maskAt does before sampling
       let g = Math.min(Math.abs(mx + 2), Math.abs(m.w + 2 - mx), Math.abs(my + 2), Math.abs(m.h + 2 - my));
       if (mx < -2 || my < -2 || mx >= m.w + 2 || my >= m.h + 2) return g * sc;
+      // every sample lies within Rs pixels (by index) of the centre's pixel; when the nearest pixel
+      // of the other value is further than that from the centre, every sample reads the centre's
+      // value and stays within (centre distance - Rs) of the change: one lookup instead of nine
+      const reach = m.soft ? (S.pitch * 0.8) / sc : S.pitch / 3;
+      const Rs = Math.ceil(reach) + 1;
+      const cu = mx | 0, cv = my | 0;
+      if (cu >= 0 && cv >= 0 && cu < m.w && cv < m.h) {
+        const Dc = m.__dt[cv * m.w + cu];
+        if (Dc > Rs) return Math.max(0, Math.min(g, Dc - Rs - 1)) * sc;
+      }
       if (m.soft) {
         const r = (S.pitch * 0.8) / sc;
         for (let dy = -1; dy <= 1; dy++) {
@@ -373,6 +388,10 @@
       }
       S.img = S.ctx.createImageData(S.cols, S.rows);
       S.gimg = S.ctx.createImageData(S.cols, S.rows);
+      S.bimg = S.ctx.createImageData(S.cols, S.rows);
+      S.glowCell = new Uint8Array(S.cols * S.rows);
+      S.glowCount = 0;
+      S.resizeEpoch = (S.resizeEpoch || 0) + 1;
       S.prev = new Float32Array(S.cols * S.rows * 3);
       S.cellOld = new Uint8Array(S.cols * S.rows);
       S.fpal = [];
@@ -855,27 +874,29 @@
         S.kCov64 = new Float64Array(cols * rows);
         S.kSafe = new Float64Array(cols * rows);
         S.rowMinSafe = new Float64Array(rows);
+        S.rowDiff32 = new Int32Array(rows);
+        S.kSafeRow = new Array(rows).fill(null);
         S.kCovRow = new Array(rows).fill(null);
       }
       const covNew = S.covNew && S.covNew.length === rows ? S.covNew : (S.covNew = new Uint8Array(rows));
       covNew.fill(0);
+      const tbk = S.debug ? (S.tb = { cov: 0, safe: 0, disp: 0, cells: 0, full: 0, why: [0, 0, 0, 0, 0, 0], gs: '' }) : null;
+      const tc0 = tbk ? performance.now() : 0;
       for (let r = 0; r < rows; r++) {
         if (S.kCovRow[r] === covKey || !rowOn(r)) continue;
         const y = (r + S.rowStart) * pitch + pitch / 2;
-        let ms = Infinity;
+        let diff = 0;
         for (let c = 0, i = r * cols; c < cols; c++, i++) {
-          const x = c * pitch + pitch / 2;
-          const v = cover(x, y);
+          const v = cover(c * pitch + pitch / 2, y);
           S.kCov[i] = v;
           S.kCov64[i] = v;
-          const g = margin(x, y);
-          S.kSafe[i] = g;
-          if (g < ms) ms = g;
+          if (S.kCov[i] !== v) diff++;
         }
+        S.rowDiff32[r] = diff;
         S.kCovRow[r] = covKey;
-        S.rowMinSafe[r] = ms;
         covNew[r] = 1;
       }
+      if (tbk) tbk.cov = performance.now() - tc0;
       const d = S.img.data;
       const gd = S.gimg.data;
       const lens = S.lens;
@@ -912,34 +933,56 @@
         S.rowLockBox = new Array(rows).fill(null);
         S.rowFade = new Int32Array(rows);
         S.rowUsed = new Int32Array(rows);
+        S.rowFOn = new Uint8Array(rows);
+        S.rowFl = new Array(rows).fill(null);
+        S.rowReset = new Uint8Array(rows);
         S.fadeCell = new Uint8Array(n);
         S.usedCell = new Uint8Array(n);
       }
-      const gsig = `${field}|${ink}|${S.gap}|${S.base}|${S.amp}|${S.rowStart}|${cols}x${rows}|${pitch}|${S.fpal.length}|${S.pal.length}|${S.prevEpoch || 0}|${fl ? fl.at : -1}|${F ? 1 : 0}|${S.isl.length}`;
+      /* What makes a row redraw in full: a resize, a shift of the panel's rows, a plain cut (every
+         cell turns at once) or the palette list resetting. A pour starting is not one: a cell it
+         has not reached keeps showing its old field, which is the field it was drawn in, and a
+         settled afterglow gives the same value from a reset as before it; so only the cells the
+         front reaches, and the ones that were still fading, change. Likewise when a pour ends or is
+         interrupted: only the cells its front had not yet passed when the row was last drawn. */
+      const gsig = `${S.rowStart}|${cols}x${rows}|${pitch}|${S.pal.length}|${S.isl.length}|${S.cutEpoch || 0}|${S.resizeEpoch || 0}`;
       const lsig = lk ? `${lk.x},${lk.y},${lk.w},${lk.h}` : "";
       const lensX = lens ? lens.x : 0, lensY = lens ? lens.y + S.scrollY : 0; // the lens in page coordinates
       // the fluid's displacement per cell, once per fluid step instead of every display frame: the
       // two states each frame blends between, and the largest movement either allows
-      if (F && (!S.dAx || S.dAx.length !== n)) {
-        S.dAx = new Float64Array(n); S.dAy = new Float64Array(n); S.dBx = new Float64Array(n); S.dBy = new Float64Array(n);
-        S.dMax = new Float64Array(n); S.dRowKey = new Array(rows).fill(null); S.rowDMax = new Float64Array(rows);
-      }
       const dKey = F ? `${F.steps || 0}|${S.rowStart}` : null;
       if (F && S.fRowKey !== dKey) {
         if (!S.fRowMax || S.fRowMax.length !== F.h) S.fRowMax = new Float64Array(F.h);
+        if (!S.fMax || S.fMax.length !== F.w * F.h) S.fMax = new Float64Array(F.w * F.h);
         for (let j = 0; j < F.h; j++) {
           let m = 0;
           for (let k = j * F.w, e = k + F.w; k < e; k++) {
             const a = Math.abs(F.dx[k]), b = Math.abs(F.dy[k]), c = Math.abs(F.pdx[k]), q = Math.abs(F.pdy[k]);
-            if (a > m) m = a;
-            if (b > m) m = b;
-            if (c > m) m = c;
-            if (q > m) m = q;
+            let g = a > b ? a : b;
+            if (c > g) g = c;
+            if (q > g) g = q;
+            S.fMax[k] = g;
+            if (g > m) m = g;
           }
           S.fRowMax[j] = m;
         }
         S.fRowKey = dKey;
       }
+      /* A cell's displacement blends four corners of the fluid grid (bilerp), so it can be no larger
+         than the largest of them: fMax holds that per grid point, once per fluid step, and a cell's
+         bound is four lookups (indexed exactly as bilerp indexes). The exact displacement, four
+         interpolations, is computed only for the cells that are drawn. */
+      const cellBound = (docX, y0) => {
+        let fx = docX / cp;
+        if (fx < 0) fx = 0; else if (fx > F.w - 1.001) fx = F.w - 1.001;
+        const k = y0 * F.w + (fx | 0);
+        const fm = S.fMax;
+        let g = fm[k];
+        if (fm[k + 1] > g) g = fm[k + 1];
+        if (fm[k + F.w] > g) g = fm[k + F.w];
+        if (fm[k + F.w + 1] > g) g = fm[k + F.w + 1];
+        return g;
+      };
       // the bound for a row of cells: the two fluid rows its samples read (clamped as bilerp clamps)
       const fluidBound = (docY) => {
         let fy = docY / cp - S.rowStart / 2;
@@ -959,18 +1002,46 @@
         }
         S.flRowsFor = fl; S.flRowsStart = S.rowStart;
       }
+      // the margins (how far the fluid may move each cell before it can look different): only
+      // while the fluid moves, recomputed when the cover or the distance maps change, at most about
+      // a millisecond per frame, rows on screen first
+      const sk = `${covKey}|${S.safeRev || 0}`;
+      // rows on screen first, then the rest of the rows drawn this frame
+      const mOrder = [];
+      for (let r = Math.max(0, vr0); r < Math.min(rows, vr0 + vrn); r++) mOrder.push(r);
+      for (let r = 0; r < rows; r++) if (rowOn(r) && !(r >= vr0 && r < vr0 + vrn)) mOrder.push(r);
+      if (F) {
+        const ts0 = performance.now();
+        marginRows(mOrder, sk, ts0 + MARGIN_MS);
+        if (tbk) tbk.safe = performance.now() - ts0;
+      }
+      // and whatever is left, in idle moments, so the first stir finds them ready
+      S.mJob = { order: mOrder, sk };
+      if (!S.mTimer) S.mTimer = setTimeout(marginIdle, 0);
       const inBox = (b, x, y) => b !== null && x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h;
       let i = 0;
       let dirty0 = rows, dirty1 = -1;
+      let band0 = rows, band1 = -1;
       for (let r = 0; r < rows; r++) {
         if (!rowOn(r)) { i += cols; continue; }
+        if (r < band0) band0 = r;
+        band1 = r;
         const row = r + S.rowStart;
         const docY = row * pitch + pitch / 2;
         const vy = docY - S.scrollY;
         const full = S.rowG[r] !== gsig || covNew[r] === 1;
+        if (tbk && full) { tbk.full++; if (S.rowG[r] !== gsig) tbk.gs = `${S.rowG[r]} -> ${gsig}`; }
         const lockOld = S.rowLockBox[r];
         const lensOnOld = S.rowLensOn[r], lensXOld = S.rowLensX[r], lensYOld = S.rowLensY[r];
         const frontOld = S.rowFront[r];
+        const flOld = S.rowFl[r];
+        // a different pour than when this row was last drawn (one started, ended or was interrupted)
+        const flSwap = flOld !== fl;
+        const resetRow = S.rowReset[r] === 1;
+        S.rowReset[r] = 0;
+        const safeOk = F !== null && S.kSafeRow[r] === sk;
+        const fOn = F ? 1 : 0;
+        const chk32 = S.rowFOn[r] !== fOn && S.rowDiff32[r] > 0;
         let chkLock = false, chkLens = false, chkFluid = false, chkFlood = false;
         if (!full) {
           if (S.rowLock[r] !== lsig) {
@@ -980,31 +1051,25 @@
           if (lensOnOld && Math.abs(docY - lensYOld) < R + pitch) chkLens = true;
           if (S.rowUsed[r] > 0) chkFluid = true;
           // the fluid can only change cells it moves past their margin
-          if (F && !(fluidBound(docY) < S.rowMinSafe[r])) chkFluid = true;
-          if (fl && S.rowDMaxF[r] > frontOld - WAKE && S.rowDMin[r] <= front) chkFlood = true;
-          if (!chkLock && !chkLens && !chkFluid && !chkFlood && S.rowFade[r] === 0) {
+          if (F && (!safeOk || !(fluidBound(docY) < S.rowMinSafe[r]))) chkFluid = true;
+          if (fl && !flSwap && S.rowDMaxF[r] > frontOld - WAKE && S.rowDMin[r] <= front) chkFlood = true;
+          if (!chkLock && !chkLens && !chkFluid && !chkFlood && !chk32 && !flSwap && S.rowFade[r] === 0) {
             // nothing touches this row: its pixels stand
             S.rowFront[r] = front;
+            S.rowFl[r] = fl;
+            S.rowFOn[r] = fOn;
             S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
             S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
             i += cols;
             continue;
           }
         }
-        if (F && S.dRowKey[r] !== dKey) {
-          let mx = 0;
-          for (let c = 0, k = r * cols; c < cols; c++, k++) {
-            const docX = c * pitch + pitch / 2;
-            const fx = docX / cp, fy = docY / cp - S.rowStart / 2;
-            const ax = bilerp(F.pdx, F.w, F.h, fx, fy), ay = bilerp(F.pdy, F.w, F.h, fx, fy);
-            const bx = bilerp(F.dx, F.w, F.h, fx, fy), by = bilerp(F.dy, F.w, F.h, fx, fy);
-            S.dAx[k] = ax; S.dAy[k] = ay; S.dBx[k] = bx; S.dBy[k] = by;
-            const m = Math.max(Math.abs(ax), Math.abs(ay), Math.abs(bx), Math.abs(by));
-            S.dMax[k] = m;
-            if (m > mx) mx = m;
-          }
-          S.dRowKey[r] = dKey;
-          S.rowDMax[r] = mx;
+        // the fluid grid row this row's samples read from (clamped as bilerp clamps)
+        let fy0 = 0;
+        if (F) {
+          let fy = docY / cp - S.rowStart / 2;
+          if (fy < 0) fy = 0; else if (fy > F.h - 1.001) fy = F.h - 1.001;
+          fy0 = fy | 0;
         }
         let rowChanged = false;
         const R1 = (R + 1) * (R + 1);
@@ -1013,22 +1078,32 @@
           if (!full) {
             // is anything that feeds this cell different from when it was last drawn?
             let need = S.fadeCell[i] === 1;
-            if (!need && chkLock) need = inBox(lk, docX, docY) || inBox(lockOld, docX, docY);
+            if (tbk && need) tbk.why[0]++;
+            if (!need && chkLock) { need = inBox(lk, docX, docY) || inBox(lockOld, docX, docY); if (tbk && need) tbk.why[1]++; }
             if (!need && chkLens) {
               const ex = docX - lensX, ey = docY - lensY, ox = docX - lensXOld, oy = docY - lensYOld;
               need = (lens !== null && ex * ex + ey * ey < R1) || (lensOnOld === 1 && ox * ox + oy * oy < R1);
+              if (tbk && need) tbk.why[2]++;
             }
-            if (!need && chkFluid) need = S.usedCell[i] === 1 || (F !== null && !(S.dMax[i] < S.kSafe[i]));
-            if (!need && chkFlood) { const dc = fl.dist[i]; need = dc > frontOld - WAKE && dc <= front; }
+            if (!need && chkFluid) { need = S.usedCell[i] === 1 || (F !== null && (!safeOk || !(cellBound(docX, fy0) < S.kSafe[i]))); if (tbk && need) tbk.why[3]++; }
+            if (!need && chk32) { need = S.kCov[i] !== S.kCov64[i]; if (tbk && need) tbk.why[5]++; }
+            if (!need && chkFlood) { const dc = fl.dist[i]; need = dc > frontOld - WAKE && dc <= front; if (tbk && need) tbk.why[4]++; }
+            if (!need && flSwap) {
+              // the old pour's cells it had not finished, and the new pour's cells it has reached
+              need = (flOld !== null && flOld.dist.length === n && flOld.dist[i] > frontOld - WAKE) || (fl !== null && fl.dist[i] <= front);
+              if (tbk && need) tbk.why[4]++;
+            }
             if (!need) continue;
           }
           rowChanged = true;
+          if (tbk) tbk.cells++;
           // where this cell samples the image from: its own place, or wherever the flow carried it
           let px = docX, py = docY;
           if (F) {
-            const ax = S.dAx[i], ay = S.dAy[i];
-            px -= ax + (S.dBx[i] - ax) * fa;
-            py -= ay + (S.dBy[i] - ay) * fa;
+            const fx = docX / cp, fy = docY / cp - S.rowStart / 2;
+            const ax = bilerp(F.pdx, F.w, F.h, fx, fy), ay = bilerp(F.pdy, F.w, F.h, fx, fy);
+            px -= ax + (bilerp(F.dx, F.w, F.h, fx, fy) - ax) * fa;
+            py -= ay + (bilerp(F.dy, F.w, F.h, fx, fy) - ay) * fa;
           }
           // which field this cell shows: the one it showed before, until the pour reaches it
           let old = null;
@@ -1047,7 +1122,12 @@
           if (lk && docX > lk.x && docX < lk.x + lk.w && docY > lk.y && docY < lk.y + lk.h) bg += 0.08;
           let tr, tg, tb;
           let dist = 1e9;
-          if (lens) dist = Math.hypot(docX - lens.x, vy - lens.y);
+          if (lens) {
+            // the exact distance (hypot, as always) only where the cell can be inside the lens; a
+            // squared test with a pixel to spare rules out the rest (hypot is slow in V8)
+            const lx = docX - lens.x, ly = vy - lens.y;
+            if (lx * lx + ly * ly < (R + 1) * (R + 1)) dist = Math.hypot(lx, ly);
+          }
           let usedCover = 0;
           if (dist < R) {
             // the glass: cells near the centre sample from closer in (magnified), and the colour
@@ -1065,7 +1145,7 @@
             bg += 0.05 * f;
           } else if (F) {
             // moved by the flow: within its margin it shows exactly what it shows at rest
-            if (S.dMax[i] < S.kSafe[i]) tr = tg = tb = S.kCov64[i];
+            if (safeOk && cellBound(docX, fy0) < S.kSafe[i]) tr = tg = tb = S.kCov64[i];
             else { tr = tg = tb = cover(px, py); usedCover = 1; }
           } else {
             // at rest a cell samples its own place: what the name and echo cover there is cached
@@ -1080,7 +1160,7 @@
           let vb = tb > bg ? tb : bg;
           // afterglow: a lit cell fades over a few frames instead of switching off at once
           const j = i * 3;
-          const pr = S.prev[j] - decay, pg = S.prev[j + 1] - decay, pb = S.prev[j + 2] - decay;
+          const pr = (resetRow ? 0 : S.prev[j]) - decay, pg = (resetRow ? 0 : S.prev[j + 1]) - decay, pb = (resetRow ? 0 : S.prev[j + 2]) - decay;
           S.fadeCell[i] = pr > vr || pg > vg || pb > vb ? 1 : 0;
           if (pr > vr) vr = pr;
           if (pg > vg) vg = pg;
@@ -1104,10 +1184,17 @@
             d[o + 2] = fb + db * vb;
           }
           d[o + 3] = 255;
+          // its glow: that of the field it shows (the old one until the pour reaches it), as light
+          // under the gap layer, which lets it through only around LEDs whose field glows
+          const glw = old ? old.glow || 0 : S.glow;
+          const bl = S.bimg.data;
+          bl[o] = d[o] * glw; bl[o + 1] = d[o + 1] * glw; bl[o + 2] = d[o + 2] * glw; bl[o + 3] = 255;
+          const gOn = glw > 0 ? 1 : 0;
+          if (S.glowCell[i] !== gOn) { S.glowCount += gOn - S.glowCell[i]; S.glowCell[i] = gOn; }
           // the gap around the cell belongs to the same field as the cell, so it pours with it
           const gp = old ? old.gap : S.gap;
           if (gp) {
-            gd[o] = gp[0]; gd[o + 1] = gp[1]; gd[o + 2] = gp[2]; gd[o + 3] = 255;
+            gd[o] = gp[0]; gd[o + 1] = gp[1]; gd[o + 2] = gp[2]; gd[o + 3] = glw > 0 ? 0 : 255;
           }
         }
         // the row's state as drawn, for the next frame's decision
@@ -1115,10 +1202,12 @@
         for (let k = r * cols, e = k + cols; k < e; k++) { fades += S.fadeCell[k]; used += S.usedCell[k]; }
         S.rowFade[r] = fades;
         S.rowUsed[r] = used;
+        S.rowFOn[r] = fOn;
         S.rowG[r] = gsig;
         S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
         S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
         S.rowFront[r] = front;
+        S.rowFl[r] = fl;
         if (rowChanged) {
           if (r < dirty0) dirty0 = r;
           dirty1 = r;
@@ -1135,12 +1224,46 @@
         S.gctx.putImageData(S.gimg, 0, 0);
         S.gapKey = fl ? null : gapKey;
       }
-      if (S.bctx && S.glow > 0 && dh > 0) S.bctx.putImageData(S.img, 0, 0, 0, dirty0, cols, dh);
+      // the glow layer: every row drawn, whatever the field, since LEDs still showing an old
+      // field keep that field's glow
+      if (S.bctx && band1 >= band0) S.bctx.putImageData(S.bimg, 0, 0, 0, band0, cols, band1 - band0 + 1);
       if (S.motionPort) sampleMotion(now);
+      // the page shows the glow layer only while some LED glows
+      const glowOn = S.glowCount > 0;
+      if (glowOn !== S.glowOn) { S.glowOn = glowOn; notify({ type: "glow", on: glowOn }); }
       notify({ type: "committed", rowStart: S.rowStart });
     }
 
+    // the fluid's margins for a list of rows, until the time runs out; a row's margins hold while
+    // its cover and the masks' distance maps are the same (the key `sk`)
+    function marginRows(order, sk, tEnd) {
+      const { cols, pitch } = S;
+      for (const r of order) {
+        if (S.kSafeRow[r] === sk || S.kCovRow[r] === null) continue;
+        if (performance.now() > tEnd) return false;
+        const docY = (r + S.rowStart) * pitch + pitch / 2;
+        let ms = Infinity;
+        for (let c = 0, k = r * cols; c < cols; c++, k++) {
+          const g = margin(c * pitch + pitch / 2, docY);
+          S.kSafe[k] = g;
+          if (g < ms) ms = g;
+        }
+        S.rowMinSafe[r] = ms;
+        S.kSafeRow[r] = sk;
+      }
+      return true;
+    }
+    // margins in idle moments: 2 ms at a time, yielding between, until the rows drawn last are done
+    // (a newer frame replaces the job, and a key that has moved on is dropped)
+    function marginIdle() {
+      S.mTimer = 0;
+      const job = S.mJob;
+      if (!job || !S.kSafe || !S.kSafeRow || job.sk !== `${S.rowStart}|${S.scrollY}|${S.masksRev}|${S.safeRev || 0}`) return;
+      if (!marginRows(job.order, job.sk, performance.now() + 2)) S.mTimer = setTimeout(marginIdle, 0);
+      else S.mJob = null;
+    }
     const RENDER_BUDGET = 0.5; // of one core
+    const MARGIN_MS = 1; // per frame, for the fluid's margins
     function tick(now) {
       timed("frame", () => tick0(now));
     }
@@ -1199,6 +1322,11 @@
     }
     function tick0(now) {
       S.queued = false;
+      // with debug on: a frame that came more than two 60 Hz frames after it was asked for is a stall
+      if (S.debug) {
+        const late = performance.now() - S.queuedAt;
+        if (late > 34) notify({ type: "slow", what: "late frame", ms: Math.round(late), at: Math.round(S.queuedAt) });
+      }
       if (!S.visible || !S.img) return;
       /* A CPU budget: the wall never takes more than half of one core. It measures what its frames
          cost and, when drawing every display frame would exceed that (a 540 Hz screen, a slow CPU),
@@ -1220,6 +1348,10 @@
       render(now);
       const ms = performance.now() - t0;
       S.renderEma = S.renderEma ? S.renderEma * 0.9 + ms * 0.1 : ms;
+      if (S.debug && ms > 8 && S.tb) {
+        const t = S.tb;
+        notify({ type: "slow", what: `frame: cover ${t.cov.toFixed(1)} margins ${t.safe.toFixed(1)} offsets ${t.disp.toFixed(1)} ms, ${t.full} full rows, ${t.cells} cells; fade/lock/lens/fluid/flood/f32 ${t.why.join("/")}; ${t.gs}`, ms: Math.round(ms * 10) / 10, at: Math.round(t0) });
+      }
       // keep drawing only while something moves: the fluid, a pour, the lens, or fading trails
       const busy = (S.fluid && S.fluid.active) || S.flood || now - S.lastChange < 450;
       if (busy) queue();
@@ -1228,6 +1360,7 @@
     function queue() {
       if (S.queued) return;
       S.queued = true;
+      S.queuedAt = performance.now();
       schedule(tick);
     }
 
@@ -1242,7 +1375,7 @@
     }
     function handle(m) {
       // with ?debug&rec every message is recorded with its time, for tools/render_equiv.mjs
-      if (S.rec && m.type !== "dumpRec" && m.type !== "pourResult" && m.type !== "motionPort") S.rec.push({ t: performance.now(), m });
+      if (S.rec && m.type !== "dumpRec" && m.type !== "pourResult" && m.type !== "maskDT" && m.type !== "motionPort") S.rec.push({ t: performance.now(), m });
       return timed("message " + m.type, () => handle0(m));
     }
 
@@ -1287,15 +1420,22 @@
         case "motionPort":
           S.motionPort = m.port;
           break;
+        case "maskDT":
+          // the distance maps for the current masks, from the pour thread
+          if (m.rev === S.masksRev) {
+            m.dts.forEach((dt, k) => { if (dt && S.masks[k]) S.masks[k].__dt = dt; });
+            S.safeRev = (S.safeRev || 0) + 1;
+          }
+          return; // nothing to draw because of it
         case "dumpRec":
           notify({ type: "rec", log: S.rec || [] });
           break;
         case "field": {
-          S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap };
+          S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap, glow: S.glow };
           // every cell now showing the current field keeps showing it until the next pour
           // reaches it; cells an unfinished pour had not reached yet keep what they showed
           if (S.cellOld) {
-            if (S.fpal.length >= 250) { S.fpal = []; S.cellOld.fill(0); }
+            if (S.fpal.length >= 250) { S.fpal = []; S.cellOld.fill(0); S.cutEpoch = (S.cutEpoch || 0) + 1; }
             S.fpal.push(S.old);
             const id = S.fpal.length;
             const fl = S.flood;
@@ -1311,13 +1451,22 @@
           S.base = m.base;
           S.amp = m.amp;
           S.glow = m.glow;
-          if (S.prev) S.prev.fill(0);
+          /* The afterglow resets with the field: until a row is next drawn, its cells' afterglow
+             counts as zero. Rather than zeroing every cell (which would force redrawing them all,
+             since a skipped cell must keep its stored afterglow), each row is marked: a cell computed
+             while its row is marked starts from zero, exactly as after a reset; drawing the row clears
+             the mark, and a cell skipped then already holds its unchanged value, which is what the
+             reset and a redraw would have left. */
+          if (S.prev) {
+            if (S.rowReset && S.rowReset.length * S.cols * 3 === S.prev.length) S.rowReset.fill(1);
+            else S.prev.fill(0);
+          }
           S.prevEpoch = (S.prevEpoch || 0) + 1;
           S.pending = null;
           S.pendingMsg = m;
           if (m.cut && !S.reduce) startFlood(now, m.texts);
           if (S.pending) break; // the pour thread is computing it: arrivals are reported when it starts
-          if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; } // a plain cut
+          if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; S.cutEpoch = (S.cutEpoch || 0) + 1; } // a plain cut
           reportArrivals(m);
           break;
         }
@@ -1330,7 +1479,7 @@
             S.pending = null;
             S.prepared = r;
             startFlood(performance.now(), p.texts);
-            if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; }
+            if (!S.flood && S.cellOld) { S.cellOld.fill(0); S.fpal = []; S.cutEpoch = (S.cutEpoch || 0) + 1; }
             if (p.msg) reportArrivals(p.msg);
             queue();
           } else if (S.wantKey === r.key) {
@@ -1361,6 +1510,11 @@
         case "masks":
           S.masks = m.masks;
           S.masksRev = (S.masksRev || 0) + 1;
+          if (!S.ctx) {
+            // the pour thread: build the masks' distance maps for the drawing thread
+            const dts = S.masks.map(maskDT);
+            notify({ type: "maskDT", rev: S.masksRev, dts }, dts.filter(Boolean).map((a) => a.buffer));
+          }
           if (m.keep) S.keep = m.keep;
           if (m.keepFixed) S.keepFixed = m.keepFixed;
           break;
