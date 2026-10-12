@@ -167,14 +167,14 @@ body::before {
   opacity: var(--gloss, 1);
 }
 .wall-gloss-hi {
-  display: none;
+  opacity: 0;
   -webkit-mask-image: radial-gradient(circle at 37% 33%, rgba(0, 0, 0, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17));
   mask-image: radial-gradient(circle at 37% 33%, rgba(0, 0, 0, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17));
   -webkit-mask-size: var(--pitch, 8px) var(--pitch, 8px);
   mask-size: var(--pitch, 8px) var(--pitch, 8px);
 }
-.wall.gloss-mixed .wall-gloss-hi { display: block; }
-.wall.gloss-mixed .wall-gloss { display: none; }
+.wall.gloss-mixed .wall-gloss-hi { opacity: 1; }
+.wall.gloss-mixed .wall-gloss { opacity: 0; }
 
 /* lit cells bleed light behind the panel, in the fields that glow. Each LED carries its own field's
    glow (wall.js), so the glow turns with the pour, cell by cell, not the whole page at once: this
@@ -183,9 +183,11 @@ body::before {
    is blurred for nothing. */
 .wall-bloom {
   filter: blur(10px);
-  display: none;
+  /* hidden by opacity, not display: Chrome skips drawing it all the same, and a canvas a worker
+     draws into keeps its layer instead of being torn down and rebuilt (which cost ~40 MB) */
+  opacity: 0;
 }
-.wall.glow-on .wall-bloom { display: block; }
+.wall.glow-on .wall-bloom { opacity: 1; }
 .wall-on body::before { display: none; }
 /* with the wall on, the gaps between cells are drawn by the wall itself (the wall-gaps layer), so they
    pour with the cells; the page background only shows outside the panel */

@@ -1,7 +1,7 @@
 /* The LED wall off the main thread: the page posts state, this worker draws and reports
    which rows each committed frame shows. Pours are computed on a second thread (pour-worker.js), so
    drawing never waits for one; it gets the same grid, mask and scroll state, and answers pour jobs. */
-importScripts("wall.js?v=20261013n35");
+importScripts("wall.js?v=20261013n39");
 
 const schedule = typeof requestAnimationFrame === "function"
   ? (fn) => requestAnimationFrame(fn)
@@ -9,7 +9,7 @@ const schedule = typeof requestAnimationFrame === "function"
 
 let pour = null;
 try {
-  pour = new Worker("pour-worker.js?v=20261013n35");
+  pour = new Worker("pour-worker.js?v=20261013n39");
 } catch (e) {
   pour = null; // no nested workers: pours are computed here, as before
 }

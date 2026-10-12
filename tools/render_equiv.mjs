@@ -63,7 +63,9 @@ function run(path, hz) {
   vm.runInContext(src, sb);
   const createWall = sb.createWall || sb.self.createWall;
   let queued = null;
-  const wall = createWall((fn) => { queued = fn; }, () => {}, null);
+  // what the page would show: the glow layer while some LED glows, the per-LED highlight while mixed
+  const vis = { glow: false, mixed: false };
+  const wall = createWall((fn) => { queued = fn; }, (m) => { if (m.type === "glow") vis.glow = m.on; if (m.type === "gloss") vis.mixed = m.mixed; }, null);
   const cv = { cells: fakeCanvas(), bloom: fakeCanvas(), gaps: fakeCanvas(), glossHi: fakeCanvas() };
   clock.t = recs[0].t - 1;
   wall.handle({ type: "init", canvas: cv.cells, bloom: cv.bloom, gaps: cv.gaps, glossHi: cv.glossHi, debug: false });
@@ -81,8 +83,10 @@ function run(path, hz) {
       q(t);
       busy += Number(process.hrtime.bigint() - t0) / 1e6;
       const h = crypto.createHash("sha1");
-      for (const k of ["cells", "bloom", "gaps", "glossHi"]) h.update(cv[k].fb);
-      frames.push({ t, h: h.digest("hex"), snap: process.env.DIAG ? { cells: cv.cells.fb.slice(), bloom: cv.bloom.fb.slice(), gaps: cv.gaps.fb.slice(), glossHi: cv.glossHi.fb.slice(), w: cv.cells._w } : null });
+      for (const k of ["cells", "gaps"]) h.update(cv[k].fb);
+      const hb = crypto.createHash("sha1").update(cv.bloom.fb).digest("hex");
+      const hg = crypto.createHash("sha1").update(cv.glossHi.fb).digest("hex");
+      frames.push({ t, h: h.digest("hex"), hb, hg, glow: vis.glow, mixed: vis.mixed, snap: process.env.DIAG ? { cells: cv.cells.fb.slice(), bloom: cv.bloom.fb.slice(), gaps: cv.gaps.fb.slice(), glossHi: cv.glossHi.fb.slice(), w: cv.cells._w } : null });
     } else frames.push({ t, h: null });
   }
   return { frames, busy, cv, sb };
@@ -105,11 +109,13 @@ for (const hz of rates) {
     if (fb && fb.h) drawnB++;
   }
   // compare the picture at every display frame: the latest drawn state of each version
-  let la = null, lb = null;
+  // (the glow layer only while the new code shows it, the per-LED highlight only while mixed)
+  let fa0 = null, fb0 = null;
+  const same = (x, y) => x && y && x.h === y.h && (!y.glow || x.hb === y.hb) && (!y.mixed || x.hg === y.hg);
   for (let i = 0; i < a.frames.length; i++) {
-    if (a.frames[i].h) la = a.frames[i].h;
-    if (b.frames[i] && b.frames[i].h) lb = b.frames[i].h;
-    if (la !== lb) {
+    if (a.frames[i].h) fa0 = a.frames[i];
+    if (b.frames[i] && b.frames[i].h) fb0 = b.frames[i];
+    if ((fa0 || fb0) && !same(fa0, fb0)) {
       diff++;
       if (first === null) {
         first = Math.round(a.frames[i].t - recs[0].t);

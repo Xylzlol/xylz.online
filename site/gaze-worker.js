@@ -3,15 +3,15 @@
    OffscreenCanvas the page handed over); and the fixation-like decision of when the tracker jumps.
    The page only hears about real jumps. With no input for 1.5s the loop stops and the picture holds
    still; any input wakes it. */
-importScripts("gaze.js?v=20261013n35");
+importScripts("gaze.js?v=20261013n39");
 const createParticles = self.createGaze;
-importScripts("gaze-net.js?v=20261013n35");
+importScripts("gaze-net.js?v=20261013n39");
 const createNet = self.createGaze;
-importScripts("gaze-dyn.js?v=20261013n35");
+importScripts("gaze-dyn.js?v=20261013n39");
 // the moving-content layer runs only when the page asks for it (?dyn), until its certificate passes
 self.GAZE_DYN = false;
 let netReady = null; // a promise of the parsed weights, or null when they failed
-netReady = fetch("gaze-net.bin?v=20261013n35").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
+netReady = fetch("gaze-net.bin?v=20261013n39").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
   .then((buf) => { createNet.setNet(createNet.parse(buf)); return true; }).catch(() => false);
 
 let g = null;

@@ -1089,7 +1089,7 @@
     let givePort = null; // hands the wall a port to the gaze worker, for its change map
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013n35");
+        const worker = new Worker("wall-worker.js?v=20261013n39");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
@@ -1277,7 +1277,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013n35");
+    const gw = new Worker("gaze-worker.js?v=20261013n39");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow(), dyn: /[?&]dyn(?:[=&]|$)/.test(location.search) }, [oc]);
@@ -1591,7 +1591,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013n35", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n39", { type: "module" });
       } catch (err) {
         return;
       }

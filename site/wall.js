@@ -393,6 +393,7 @@
       S.gloss0 = S.rows; S.gloss1 = -1; // rows whose gloss changed since the last upload
       S.glossOff = S.cols * S.rows; // LEDs whose gloss is not yet the current field's
       S.glowCell = new Uint8Array(S.cols * S.rows);
+      S.bloomFresh = false; S.ghFresh = false;
       S.glowCount = 0;
       S.resizeEpoch = (S.resizeEpoch || 0) + 1;
       S.prev = new Float32Array(S.cols * S.rows * 3);
@@ -1010,21 +1011,26 @@
       // a millisecond per frame, rows on screen first
       const sk = `${covKey}|${S.safeRev || 0}`;
       // rows on screen first, then the rest of the rows drawn this frame
-      const mOrder = [];
-      for (let r = Math.max(0, vr0); r < Math.min(rows, vr0 + vrn); r++) mOrder.push(r);
-      for (let r = 0; r < rows; r++) if (rowOn(r) && !(r >= vr0 && r < vr0 + vrn)) mOrder.push(r);
+      // (into one reused buffer: a fresh array every frame made V8 keep a larger heap)
+      if (!S.mOrd || S.mOrd.length !== rows) S.mOrd = new Int32Array(rows);
+      let mN = 0;
+      for (let r = Math.max(0, vr0); r < Math.min(rows, vr0 + vrn); r++) S.mOrd[mN++] = r;
+      for (let r = 0; r < rows; r++) if (rowOn(r) && !(r >= vr0 && r < vr0 + vrn)) S.mOrd[mN++] = r;
+      S.mOrdN = mN;
       if (F) {
         const ts0 = performance.now();
-        marginRows(mOrder, sk, ts0 + MARGIN_MS);
+        marginRows(sk, ts0 + MARGIN_MS);
         if (tbk) tbk.safe = performance.now() - ts0;
       }
       // and whatever is left, in idle moments, so the first stir finds them ready
-      S.mJob = { order: mOrder, sk };
+      S.mJobSk = sk;
       if (!S.mTimer) S.mTimer = setTimeout(marginIdle, 0);
       const inBox = (b, x, y) => b !== null && x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h;
       let i = 0;
       let dirty0 = rows, dirty1 = -1;
       let band0 = rows, band1 = -1;
+      let gap0 = rows, gap1 = -1;
+      let glo0 = rows, glo1 = -1;
       for (let r = 0; r < rows; r++) {
         if (!rowOn(r)) { i += cols; continue; }
         if (r < band0) band0 = r;
@@ -1061,7 +1067,7 @@
             S.rowFront[r] = front;
             S.rowFl[r] = fl;
             S.rowFOn[r] = fOn;
-            S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
+            S.rowLock[r] = lsig; S.rowLockBox[r] = lk;
             S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
             i += cols;
             continue;
@@ -1191,7 +1197,15 @@
           // under the gap layer, which lets it through only around LEDs whose field glows
           const glw = old ? old.glow || 0 : S.glow;
           const bl = S.bimg.data;
-          bl[o] = d[o] * glw; bl[o + 1] = d[o + 1] * glw; bl[o + 2] = d[o + 2] * glw; bl[o + 3] = 255;
+          // the bytes these become (a clamped array rounds halves to even), so only real changes
+          // mark the row
+          const q8 = S.q8 || (S.q8 = new Uint8ClampedArray(3));
+          q8[0] = d[o] * glw; q8[1] = d[o + 1] * glw; q8[2] = d[o + 2] * glw;
+          if (bl[o] !== q8[0] || bl[o + 1] !== q8[1] || bl[o + 2] !== q8[2] || bl[o + 3] !== 255) {
+            bl[o] = q8[0]; bl[o + 1] = q8[1]; bl[o + 2] = q8[2]; bl[o + 3] = 255;
+            if (r < glo0) glo0 = r;
+            if (r > glo1) glo1 = r;
+          }
           const gOn = glw > 0 ? 1 : 0;
           const gls = Math.round(255 * (old ? (old.gloss == null ? 1 : old.gloss) : (S.gloss == null ? 1 : S.gloss)));
           const gh = S.ghimg.data;
@@ -1207,7 +1221,13 @@
           // the gap around the cell belongs to the same field as the cell, so it pours with it
           const gp = old ? old.gap : S.gap;
           if (gp) {
-            gd[o] = gp[0]; gd[o + 1] = gp[1]; gd[o + 2] = gp[2]; gd[o + 3] = glw > 0 ? 0 : 255;
+            const ga = glw > 0 ? 0 : 255;
+            if (gd[o] !== gp[0] || gd[o + 1] !== gp[1] || gd[o + 2] !== gp[2] || gd[o + 3] !== ga) {
+              gd[o] = gp[0]; gd[o + 1] = gp[1]; gd[o + 2] = gp[2]; gd[o + 3] = ga;
+              // only rows whose gap colour really changed go to the gap layer
+              if (r < gap0) gap0 = r;
+              if (r > gap1) gap1 = r;
+            }
           }
         }
         // the row's state as drawn, for the next frame's decision
@@ -1217,7 +1237,7 @@
         S.rowUsed[r] = used;
         S.rowFOn[r] = fOn;
         S.rowG[r] = gsig;
-        S.rowLock[r] = lsig; S.rowLockBox[r] = lk ? { x: lk.x, y: lk.y, w: lk.w, h: lk.h } : null;
+        S.rowLock[r] = lsig; S.rowLockBox[r] = lk;
         S.rowLensOn[r] = lens ? 1 : 0; S.rowLensX[r] = lensX; S.rowLensY[r] = lensY;
         S.rowFront[r] = front;
         S.rowFl[r] = fl;
@@ -1236,12 +1256,23 @@
          images already holds what is on the canvas (a row is uploaded whenever a cell in it is
          computed), so this is the same picture; and a software compositor then redraws, and
          re-blurs, only that band instead of the whole screen on every frame of a pour. */
-      if (S.gctx && S.gap && dh > 0) S.gctx.putImageData(S.gimg, 0, 0, 0, dirty0, cols, dh);
-      if (S.bctx && dh > 0) S.bctx.putImageData(S.bimg, 0, 0, 0, dirty0, cols, dh);
+      if (S.gctx && S.gap && gap1 >= gap0) S.gctx.putImageData(S.gimg, 0, 0, 0, gap0, cols, gap1 - gap0 + 1);
+      /* The glow and highlight layers get frames only while they are shown: a canvas fed frames it
+         never draws makes Chrome hold them (it cost ~40 MB). When one is switched on it first gets
+         its whole image, which every computed LED has kept current all along. */
+      if (S.bctx) {
+        if (S.glowCount > 0) {
+          if (!S.bloomFresh) { S.bctx.putImageData(S.bimg, 0, 0); S.bloomFresh = true; }
+          else if (glo1 >= glo0) S.bctx.putImageData(S.bimg, 0, 0, 0, glo0, cols, glo1 - glo0 + 1);
+        } else S.bloomFresh = false;
+      }
       if (S.motionPort) sampleMotion(now);
-      // the gloss layers: only the rows where some LED's gloss changed
-      if (S.ghctx && S.gloss1 >= S.gloss0) {
-        S.ghctx.putImageData(S.ghimg, 0, 0, 0, S.gloss0, cols, S.gloss1 - S.gloss0 + 1);
+      // the highlight layer: only while gloss is mixed, and then only the rows where it changed
+      if (S.ghctx) {
+        if (S.glossOff > 0) {
+          if (!S.ghFresh) { S.ghctx.putImageData(S.ghimg, 0, 0); S.ghFresh = true; }
+          else if (S.gloss1 >= S.gloss0) S.ghctx.putImageData(S.ghimg, 0, 0, 0, S.gloss0, cols, S.gloss1 - S.gloss0 + 1);
+        } else S.ghFresh = false;
         S.gloss0 = S.rows; S.gloss1 = -1;
       }
       /* The page shows the per-LED gloss layers only while LEDs' gloss differs (a pour between the
@@ -1260,9 +1291,10 @@
 
     // the fluid's margins for a list of rows, until the time runs out; a row's margins hold while
     // its cover and the masks' distance maps are the same (the key `sk`)
-    function marginRows(order, sk, tEnd) {
+    function marginRows(sk, tEnd) {
       const { cols, pitch } = S;
-      for (const r of order) {
+      for (let q = 0; q < S.mOrdN; q++) {
+        const r = S.mOrd[q];
         if (S.kSafeRow[r] === sk || S.kCovRow[r] === null) continue;
         if (performance.now() > tEnd) return false;
         const docY = (r + S.rowStart) * pitch + pitch / 2;
@@ -1281,10 +1313,10 @@
     // (a newer frame replaces the job, and a key that has moved on is dropped)
     function marginIdle() {
       S.mTimer = 0;
-      const job = S.mJob;
-      if (!job || !S.kSafe || !S.kSafeRow || job.sk !== `${S.rowStart}|${S.scrollY}|${S.masksRev}|${S.safeRev || 0}`) return;
-      if (!marginRows(job.order, job.sk, performance.now() + 2)) S.mTimer = setTimeout(marginIdle, 0);
-      else S.mJob = null;
+      const sk = S.mJobSk;
+      if (!sk || !S.kSafe || !S.kSafeRow || sk !== `${S.rowStart}|${S.scrollY}|${S.masksRev}|${S.safeRev || 0}`) return;
+      if (!marginRows(sk, performance.now() + 2)) S.mTimer = setTimeout(marginIdle, 0);
+      else S.mJobSk = null;
     }
     const RENDER_BUDGET = 0.5; // of one core
     const MARGIN_MS = 1; // per frame, for the fluid's margins
