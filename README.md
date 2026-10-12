@@ -1,6 +1,6 @@
 ![Selecting GitHub turns the page black. The colour spreads from the GitHub link outward and goes around the letters of the name.](media/pour.webp)
 
-Source for xylz.online, the personal site of xylz, a security researcher. It is a single page with links to Immunefi, the public reports, GitHub and X.
+Source for xylz.online
 
 The page is drawn as an LED panel: a grid of round cells, and the name is made of lit cells. Each of the four links has its own background colour (white, sky blue, black, magenta). When you select a link, the new colour spreads across the grid from that link. Thin tracker lines mark the selected link and print where it goes.
 
