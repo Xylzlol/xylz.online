@@ -376,7 +376,7 @@
 
   /* The caption must be readable: if its spot overlaps any block of text or the name (it can at
      high zoom), it moves into the lock box's own top-right corner. */
-  const SAY_OBSTACLES = ".caption, .list-note, .targets li, h2, .result, .report, .close-links li, .rail";
+  const SAY_OBSTACLES = ".caption, .list-note, .targets li, h2, .result, .report, .close-links li, .source, .rail";
   function keepSayClear(box) {
     const r = lockSay.getBoundingClientRect();
     const me = { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 };
@@ -1056,7 +1056,7 @@
     let post = null;
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013m2");
+        const worker = new Worker("wall-worker.js?v=20261013m3");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
@@ -1080,12 +1080,16 @@
       return [0, 2, 4].map((k) => parseInt(v.slice(k, k + 2), 16));
     };
 
-    /* The canvas covers the viewport plus half a viewport above and below. It scrolls with the
-       document, so the name never swims; when the reader nears its edge, a re-centred frame is
-       drawn and the canvas moves only once that frame has been committed. */
+    /* The canvas covers the whole document, one pixel per cell, and scrolls with it: the name never
+       swims and the canvas never has to move. (Moving it meant the worker's frame and the page's
+       style change could land in different compositor frames, and the name jumped for one frame.)
+       Only a document taller than FULL_ROWS falls back to a window of the document that re-centres
+       when the reader nears its edge. */
+    const FULL_ROWS = 1400;
     let half = 0;
     let want = 0;
     let shown = null;
+    let full = false;
 
     function committed(m) {
       if (m.type === "arrivals") { arrived(m); return; }
@@ -1097,30 +1101,32 @@
     function size() {
       wallPitch = Math.max(6, Math.min(9, Math.round(innerWidth / 170)));
       const vrows = Math.ceil(innerHeight / wallPitch);
+      const docRows = Math.ceil(Math.max(document.documentElement.scrollHeight, innerHeight) / wallPitch) + 1;
+      full = docRows <= FULL_ROWS;
       half = Math.ceil(vrows / 2) + 1;
       const cols = Math.ceil(innerWidth / wallPitch) + 1;
-      const rows = vrows + half * 2;
+      const rows = full ? docRows : vrows + half * 2;
       host.style.setProperty("--pitch", `${wallPitch}px`);
       for (const c of [cells, bloom, gaps]) {
         c.style.width = `${cols * wallPitch}px`;
         c.style.height = `${rows * wallPitch}px`;
       }
       shown = null;
-      want = Math.floor(scrollY / wallPitch) - half;
+      want = full ? 0 : Math.floor(scrollY / wallPitch) - half;
       post({ type: "resize", cols, rows, pitch: wallPitch });
       scroll();
     }
 
     function scroll() {
       const row = Math.floor(scrollY / wallPitch);
-      if (row - want < half / 2 || row - want > half * 1.5) want = row - half;
+      if (!full && (row - want < half / 2 || row - want > half * 1.5)) want = row - half;
       post({ type: "scroll", scrollY, rowStart: want, vw: innerWidth, vh: innerHeight });
     }
 
     /* Text keeps the colour it had until the pour reaches it. Before the field changes, every
        block of text is pinned to the colour it shows; the worker reports when the pour arrives at
        each block's centre, and the pin comes off then. */
-    const TEXT = ".caption, .list-note, .targets li, h2, .result, .report, .close-links li, .rail a";
+    const TEXT = ".caption, .list-note, .targets li, h2, .result, .report, .close-links li, .source, .rail a";
     let pins = [];
     let seq = 0;
     function pinText() {
@@ -1172,7 +1178,7 @@
       if (!m.data) return;
       // the name itself, and a giant echo of it far behind, drifting at a third of the scroll speed
       // where text sits, in document px, so the residue keeps off it
-      const keep = [...document.querySelectorAll(".caption, .targets li, h2, .result, .report, .close-links li")].map((el) => {
+      const keep = [...document.querySelectorAll(".caption, .targets li, h2, .result, .report, .close-links li, .source")].map((el) => {
         const r = el.getBoundingClientRect();
         return { x: r.left + scrollX - 10, y: r.top + scrollY - 10, w: r.width + 20, h: r.height + 20 };
       });
@@ -1223,7 +1229,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013m2");
+    const gw = new Worker("gaze-worker.js?v=20261013m3");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow() }, [oc]);
@@ -1235,7 +1241,7 @@
     const AOI = [
       [".name", 3.2, "shape"], [".caption", 1.4, "text"], [".t-name", 1.6, "text"], [".t-note", 0.7, "text"],
       ["h2", 2.2, "shape"], [".result-lead, .tally, .r-meta", 0.9, "text"], [".r-title", 1.3, "text"],
-      [".close-links a", 1, "text"], [".list-note", 1.2, "text"], [".lock-say", 0.8, "text"],
+      [".close-links a, .source a", 1, "text"], [".list-note", 1.2, "text"], [".lock-say", 0.8, "text"],
     ];
     let textRects = [];
     let textLines = [];
@@ -1522,7 +1528,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013m2", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013m3", { type: "module" });
       } catch (err) {
         return;
       }

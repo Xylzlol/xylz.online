@@ -2,7 +2,7 @@
    LED cells, on an OffscreenCanvas the page handed over), and the fixation-like decision of when the
    tracker jumps. The page only hears about real jumps. With no input for 1.5s the loop stops and the
    picture holds still; any input wakes it. */
-importScripts("gaze.js?v=20261013m2");
+importScripts("gaze.js?v=20261013m3");
 
 let g = null;
 let canvas = null, ctx = null;
