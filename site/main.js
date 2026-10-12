@@ -1055,10 +1055,12 @@
 
   var wallPitch = 0; // hoisted: scroll and field handlers run before the wall is set up
   const FIELD_LIGHT = {
-    white: { base: 0.055, amp: 0.02, glow: 0 },
-    black: { base: 0.08, amp: 0.025, glow: 0.8 },
-    sky: { base: 0.07, amp: 0.02, glow: 0 },
-    magenta: { base: 0.07, amp: 0.02, glow: 0 },
+    // glow: how strongly lit LEDs bleed light into the gaps; gloss: the strength of each LED's
+    // specular highlight and rim (both per LED in the wall, so they turn with the pour)
+    white: { base: 0.055, amp: 0.02, glow: 0, gloss: 1 },
+    black: { base: 0.08, amp: 0.025, glow: 0.75, gloss: 0.7 },
+    sky: { base: 0.07, amp: 0.02, glow: 0, gloss: 1 },
+    magenta: { base: 0.07, amp: 0.02, glow: 0, gloss: 1 },
   };
 
   var wallCtl = (() => {
@@ -1071,26 +1073,34 @@
     cells.className = "wall-cells";
     const gaps = document.createElement("canvas");
     gaps.className = "wall-gaps";
+    // each LED is a small domed lens: a darker rim (the same on every field) and a highlight, whose
+    // strength depends on the field: a plain layer while every LED has the same, and one pixel per
+    // LED, masked into shape in CSS, while a pour mixes them
+    const rim = document.createElement("div");
+    rim.className = "wall-rim";
+    const glossHi = document.createElement("canvas");
+    glossHi.className = "wall-gloss-hi";
     const gloss = document.createElement("div");
     gloss.className = "wall-gloss";
     // the glow lies under the gaps, which let it through only around LEDs whose field glows
-    host.append(bloom, gaps, cells, gloss);
+    host.append(bloom, gaps, cells, rim, glossHi, gloss);
 
     let post = null;
     let givePort = null; // hands the wall a port to the gaze worker, for its change map
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013n31");
+        const worker = new Worker("wall-worker.js?v=20261013n35");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
         const og = gaps.transferControlToOffscreen();
-        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, debug: location.search.includes("debug"), rec: /[?&]rec(?:[=&]|$)/.test(location.search) }, [oc, ob, og]);
+        const oh = glossHi.transferControlToOffscreen();
+        worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, glossHi: oh, debug: location.search.includes("debug"), rec: /[?&]rec(?:[=&]|$)/.test(location.search) }, [oc, ob, og, oh]);
         post = (m) => worker.postMessage(m);
         givePort = (port) => worker.postMessage({ type: "motionPort", port }, [port]);
       } else if (window.createWall) {
         const w = window.createWall((fn) => requestAnimationFrame(fn), (m) => committed(m));
-        w.handle({ type: "init", canvas: cells, bloom, gaps });
+        w.handle({ type: "init", canvas: cells, bloom, gaps, glossHi });
         post = (m) => w.handle(m);
       }
     } catch (err) {
@@ -1125,6 +1135,12 @@
       if (m.type === "arrivals") { arrived(m); return; }
       if (m.type === "rec") { window.__wallRec = m.log; return; }
       if (m.type === "glow") { host.classList.toggle("glow-on", m.on); return; }
+      if (m.type === "gloss") {
+        // the strength only changes while the per-LED layers are showing, never under the eye
+        if (!m.mixed) host.style.setProperty("--gloss", m.k);
+        host.classList.toggle("gloss-mixed", m.mixed);
+        return;
+      }
       if (m.type !== "committed" || m.rowStart === shown) return;
       shown = m.rowStart;
       host.style.setProperty("--top", `${shown * wallPitch}px`);
@@ -1139,7 +1155,7 @@
       const cols = Math.ceil(innerWidth / wallPitch) + 1;
       const rows = full ? docRows : vrows + half * 2;
       host.style.setProperty("--pitch", `${wallPitch}px`);
-      for (const c of [cells, bloom, gaps]) {
+      for (const c of [cells, bloom, gaps, glossHi]) {
         c.style.width = `${cols * wallPitch}px`;
         c.style.height = `${rows * wallPitch}px`;
       }
@@ -1261,7 +1277,7 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013n31");
+    const gw = new Worker("gaze-worker.js?v=20261013n35");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
     gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow(), dyn: /[?&]dyn(?:[=&]|$)/.test(location.search) }, [oc]);
@@ -1575,7 +1591,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013n31", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n35", { type: "module" });
       } catch (err) {
         return;
       }

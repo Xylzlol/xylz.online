@@ -147,16 +147,34 @@ body::before {
   -webkit-mask-size: var(--pitch, 8px) var(--pitch, 8px);
   mask-size: var(--pitch, 8px) var(--pitch, 8px);
 }
-/* each cell is a small domed lens: a highlight up and left, a darker rim at its edge */
+/* each cell is a small domed lens: a highlight up and left, a darker rim at its edge. The rim is the
+   same on every field (it never switches, so a pour cannot change it ahead of its front). The
+   highlight is 0.7 as strong on the black field as elsewhere: a plain layer at the field's strength
+   while every LED has the same, and while a pour mixes them, a layer the wall draws with one pixel per
+   LED (white, alpha = the strength of the field that LED shows), masked here into the highlight's
+   shape; so the highlight turns with the pour, LED by LED */
+.wall-rim,
 .wall-gloss {
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 37% 33%, rgba(255, 255, 255, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17)),
-    radial-gradient(circle at 50% 50%, transparent 0 calc(var(--pitch, 8px) * 0.26), rgba(0, 0, 0, 0.07) calc(var(--pitch, 8px) * 0.37), transparent calc(var(--pitch, 8px) * 0.41));
   background-size: var(--pitch, 8px) var(--pitch, 8px);
 }
-:root[data-field="black"] .wall-gloss { opacity: 0.7; }
+.wall-rim {
+  background-image: radial-gradient(circle at 50% 50%, transparent 0 calc(var(--pitch, 8px) * 0.26), rgba(0, 0, 0, 0.07) calc(var(--pitch, 8px) * 0.37), transparent calc(var(--pitch, 8px) * 0.41));
+}
+.wall-gloss {
+  background-image: radial-gradient(circle at 37% 33%, rgba(255, 255, 255, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17));
+  opacity: var(--gloss, 1);
+}
+.wall-gloss-hi {
+  display: none;
+  -webkit-mask-image: radial-gradient(circle at 37% 33%, rgba(0, 0, 0, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17));
+  mask-image: radial-gradient(circle at 37% 33%, rgba(0, 0, 0, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17));
+  -webkit-mask-size: var(--pitch, 8px) var(--pitch, 8px);
+  mask-size: var(--pitch, 8px) var(--pitch, 8px);
+}
+.wall.gloss-mixed .wall-gloss-hi { display: block; }
+.wall.gloss-mixed .wall-gloss { display: none; }
 
 /* lit cells bleed light behind the panel, in the fields that glow. Each LED carries its own field's
    glow (wall.js), so the glow turns with the pour, cell by cell, not the whole page at once: this

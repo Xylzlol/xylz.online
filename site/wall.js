@@ -381,7 +381,7 @@
       S.rows = m.rows;
       S.pitch = m.pitch;
       if (!S.ctx) return; // the pour thread draws nothing
-      for (const c of [S.canvas, S.bloom, S.gapsCanvas]) {
+      for (const c of [S.canvas, S.bloom, S.gapsCanvas, S.glossHi]) {
         if (!c) continue;
         c.width = S.cols;
         c.height = S.rows;
@@ -389,6 +389,9 @@
       S.img = S.ctx.createImageData(S.cols, S.rows);
       S.gimg = S.ctx.createImageData(S.cols, S.rows);
       S.bimg = S.ctx.createImageData(S.cols, S.rows);
+      S.ghimg = S.ctx.createImageData(S.cols, S.rows);
+      S.gloss0 = S.rows; S.gloss1 = -1; // rows whose gloss changed since the last upload
+      S.glossOff = S.cols * S.rows; // LEDs whose gloss is not yet the current field's
       S.glowCell = new Uint8Array(S.cols * S.rows);
       S.glowCount = 0;
       S.resizeEpoch = (S.resizeEpoch || 0) + 1;
@@ -1190,6 +1193,16 @@
           const bl = S.bimg.data;
           bl[o] = d[o] * glw; bl[o + 1] = d[o + 1] * glw; bl[o + 2] = d[o + 2] * glw; bl[o + 3] = 255;
           const gOn = glw > 0 ? 1 : 0;
+          const gls = Math.round(255 * (old ? (old.gloss == null ? 1 : old.gloss) : (S.gloss == null ? 1 : S.gloss)));
+          const gh = S.ghimg.data;
+          if (gh[o + 3] !== gls || gh[o] !== 255) {
+            const gt = Math.round(255 * (S.gloss == null ? 1 : S.gloss));
+            S.glossOff += (gls !== gt ? 1 : 0) - (gh[o] === 255 && gh[o + 3] === gt ? 0 : 1);
+            gh[o] = 255; gh[o + 1] = 255; gh[o + 2] = 255; gh[o + 3] = gls;
+            const rr = (i / S.cols) | 0;
+            if (rr < S.gloss0) S.gloss0 = rr;
+            if (rr > S.gloss1) S.gloss1 = rr;
+          }
           if (S.glowCell[i] !== gOn) { S.glowCount += gOn - S.glowCell[i]; S.glowCell[i] = gOn; }
           // the gap around the cell belongs to the same field as the cell, so it pours with it
           const gp = old ? old.gap : S.gap;
@@ -1219,15 +1232,26 @@
       // the gap layer only changes while a pour runs or the rows / field change
       // the gap layer only changes while a pour runs, or when the rows, the field or the per-cell
       // history change; it is drawn only once the gap colour is known
-      const gapKey = `${S.rowStart}|${S.fpal.length}|${S.gap}|${S.cols}x${S.rows}`;
-      if (S.gctx && S.gap && (fl || S.gapKey !== gapKey)) {
-        S.gctx.putImageData(S.gimg, 0, 0);
-        S.gapKey = fl ? null : gapKey;
-      }
-      // the glow layer: every row drawn, whatever the field, since LEDs still showing an old
-      // field keep that field's glow
-      if (S.bctx && band1 >= band0) S.bctx.putImageData(S.bimg, 0, 0, 0, band0, cols, band1 - band0 + 1);
+      /* The gap and glow layers: like the LEDs, only the rows that changed. Every other row of their
+         images already holds what is on the canvas (a row is uploaded whenever a cell in it is
+         computed), so this is the same picture; and a software compositor then redraws, and
+         re-blurs, only that band instead of the whole screen on every frame of a pour. */
+      if (S.gctx && S.gap && dh > 0) S.gctx.putImageData(S.gimg, 0, 0, 0, dirty0, cols, dh);
+      if (S.bctx && dh > 0) S.bctx.putImageData(S.bimg, 0, 0, 0, dirty0, cols, dh);
       if (S.motionPort) sampleMotion(now);
+      // the gloss layers: only the rows where some LED's gloss changed
+      if (S.ghctx && S.gloss1 >= S.gloss0) {
+        S.ghctx.putImageData(S.ghimg, 0, 0, 0, S.gloss0, cols, S.gloss1 - S.gloss0 + 1);
+        S.gloss0 = S.rows; S.gloss1 = -1;
+      }
+      /* The page shows the per-LED gloss layers only while LEDs' gloss differs (a pour between the
+         black field and another); otherwise every LED has the field's gloss and the plain gloss
+         layer at that strength is the same picture, at no cost to a software compositor. */
+      const glossMixed = S.glossOff > 0;
+      if (glossMixed !== S.glossMixed || S.gloss !== S.glossShown) {
+        S.glossMixed = glossMixed; S.glossShown = S.gloss;
+        notify({ type: "gloss", mixed: glossMixed, k: S.gloss == null ? 1 : S.gloss });
+      }
       // the page shows the glow layer only while some LED glows
       const glowOn = S.glowCount > 0;
       if (glowOn !== S.glowOn) { S.glowOn = glowOn; notify({ type: "glow", on: glowOn }); }
@@ -1413,6 +1437,8 @@
           S.bloom = m.bloom || null;
           S.ctx = S.canvas.getContext("2d", { alpha: false });
           S.bctx = S.bloom ? S.bloom.getContext("2d", { alpha: false }) : null;
+          S.glossHi = m.glossHi || null;
+          S.ghctx = S.glossHi ? S.glossHi.getContext("2d") : null;
           break;
         case "resize":
           resize(m);
@@ -1431,7 +1457,7 @@
           notify({ type: "rec", log: S.rec || [] });
           break;
         case "field": {
-          S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap, glow: S.glow };
+          S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap, glow: S.glow, gloss: S.gloss };
           // every cell now showing the current field keeps showing it until the next pour
           // reaches it; cells an unfinished pour had not reached yet keep what they showed
           if (S.cellOld) {
@@ -1451,6 +1477,14 @@
           S.base = m.base;
           S.amp = m.amp;
           S.glow = m.glow;
+          S.gloss = m.gloss == null ? 1 : m.gloss;
+          // recount the LEDs whose gloss differs from this field's
+          if (S.ghimg) {
+            const gh = S.ghimg.data, gt = Math.round(255 * S.gloss);
+            let off = 0;
+            for (let q = 0; q < gh.length; q += 4) if (gh[q] !== 255 || gh[q + 3] !== gt) off++;
+            S.glossOff = off;
+          }
           /* The afterglow resets with the field: until a row is next drawn, its cells' afterglow
              counts as zero. Rather than zeroing every cell (which would force redrawing them all,
              since a skipped cell must keep its stored afterglow), each row is marked: a cell computed

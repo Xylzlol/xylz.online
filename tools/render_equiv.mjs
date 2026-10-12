@@ -64,9 +64,9 @@ function run(path, hz) {
   const createWall = sb.createWall || sb.self.createWall;
   let queued = null;
   const wall = createWall((fn) => { queued = fn; }, () => {}, null);
-  const cv = { cells: fakeCanvas(), bloom: fakeCanvas(), gaps: fakeCanvas() };
+  const cv = { cells: fakeCanvas(), bloom: fakeCanvas(), gaps: fakeCanvas(), glossHi: fakeCanvas() };
   clock.t = recs[0].t - 1;
-  wall.handle({ type: "init", canvas: cv.cells, bloom: cv.bloom, gaps: cv.gaps, debug: false });
+  wall.handle({ type: "init", canvas: cv.cells, bloom: cv.bloom, gaps: cv.gaps, glossHi: cv.glossHi, debug: false });
   const dt = 1000 / hz;
   const end = recs[recs.length - 1].t + 2500;
   let mi = 0;
@@ -81,8 +81,8 @@ function run(path, hz) {
       q(t);
       busy += Number(process.hrtime.bigint() - t0) / 1e6;
       const h = crypto.createHash("sha1");
-      for (const k of ["cells", "bloom", "gaps"]) h.update(cv[k].fb);
-      frames.push({ t, h: h.digest("hex"), snap: process.env.DIAG ? { cells: cv.cells.fb.slice(), bloom: cv.bloom.fb.slice(), gaps: cv.gaps.fb.slice(), w: cv.cells._w } : null });
+      for (const k of ["cells", "bloom", "gaps", "glossHi"]) h.update(cv[k].fb);
+      frames.push({ t, h: h.digest("hex"), snap: process.env.DIAG ? { cells: cv.cells.fb.slice(), bloom: cv.bloom.fb.slice(), gaps: cv.gaps.fb.slice(), glossHi: cv.glossHi.fb.slice(), w: cv.cells._w } : null });
     } else frames.push({ t, h: null });
   }
   return { frames, busy, cv, sb };
@@ -116,7 +116,7 @@ for (const hz of rates) {
         // which canvas, how many pixels, where
         const fa = [...a.frames.slice(0, i + 1)].reverse().find((f) => f.snap), fb = [...b.frames.slice(0, i + 1)].reverse().find((f) => f.snap);
         if (fa && fb) {
-          for (const k of ["cells", "bloom", "gaps"]) {
+          for (const k of ["cells", "bloom", "gaps", "glossHi"]) {
             const A = fa.snap[k], B = fb.snap[k], w = fa.snap.w;
             let nd = 0, x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1, ex = null;
             for (let q = 0; q < A.length; q += 4) {
