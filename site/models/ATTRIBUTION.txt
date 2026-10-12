@@ -1,0 +1,21 @@
+ui_saliency.onnx — a UI saliency model used by gaze.js (where people are likely to look on this page)
+
+Model: UNISAL, "Unified Image and Video Saliency Modeling" (Droste, Jiao, Noble, ECCV 2020),
+       https://github.com/rdroste/unisal — Apache License 2.0 (see UNISAL-LICENSE.txt).
+       Starting weights: training_runs/pretrained_unisal/weights_best.pth.
+
+Fine-tuned on: UEyes, "UEyes: Understanding Visual Saliency across User Interface Types"
+       (Jiang, Leiva, Tavakoli, Houssel, Kylmälä, Oulasvirta, CHI 2023),
+       https://zenodo.org/record/8010312 — Creative Commons Attribution 4.0 (CC BY 4.0).
+       Used: webpage and desktop UI screenshots with 3-second heatmaps and fixation maps
+       (843 train, 93 validation from the train split; official test split held out).
+
+Changes: fine-tuned (KLD - 0.1 NSS - 0.1 CC, AdamW, early stopping on validation, best epoch 3),
+       exported to ONNX with a 4x average-pool output (112x72 probability map); weights stored as int8 per
+       output channel and dequantised once at load (held-out webpage CC 0.623 vs 0.622 at fp32; 3.5 MB).
+
+Held-out UEyes test (pretrained -> fine-tuned):
+       webpages (27):            CC 0.331 -> 0.620, NSS 0.87 -> 1.59, KLD 1.45 -> 0.79
+       webpages + desktop (54):  CC 0.354 -> 0.612, NSS 0.93 -> 1.61, KLD 1.42 -> 0.83
+
+Runtime: ONNX Runtime Web 1.30.0 (MIT), self-hosted in vendor/ort/.

@@ -1,0 +1,787 @@
+@font-face {
+  font-family: "Archivo";
+  src: url("fonts/archivo-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-display: swap;
+}
+
+/* Fields: the whole page is one field at a time, cut hard, never faded.
+   --bokeh is the out-of-focus light far behind the page in that field. */
+:root,
+:root[data-field="white"] {
+  --field: #F7F9FA;
+  --swap: #F2F4F4;
+  --ink: #050506;
+  --bokeh: rgba(184, 220, 235, 0.42);
+  --gap: #FFFFFF;
+  --glow: 0;
+}
+:root[data-field="black"] {
+  --field: #050506;
+  --swap: #F2F4F4;
+  --ink: #F7F9FA;
+  --bokeh: rgba(247, 249, 250, 0.07);
+  --gap: #000000;
+  --glow: 0.75;
+}
+:root[data-field="sky"] {
+  --field: #B8DCEB;
+  --swap: #B3D7E5;
+  --ink: #050506;
+  --bokeh: rgba(255, 255, 255, 0.3);
+  --gap: #C5EBFB;
+  --glow: 0;
+}
+:root[data-field="magenta"] {
+  --field: #FF2BD6;
+  --swap: #FA26D0;
+  --ink: #050506;
+  --bokeh: rgba(255, 255, 255, 0.22);
+  --gap: #FF2EE5;
+  --glow: 0;
+}
+:root {
+  --soft: color-mix(in oklab, var(--ink) 74%, var(--field));
+  --faint: color-mix(in oklab, var(--ink) 10%, transparent);
+  --line: 1px;
+  --gutter: clamp(20px, 4.2vw, 64px);
+  --step: clamp(56px, 9vw, 136px);
+  --g: 10px;
+  color-scheme: light;
+}
+:root[data-field="black"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+
+html {
+  background: var(--field);
+  color: var(--ink);
+  scrollbar-color: var(--ink) var(--field);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  position: relative;
+  font-family: "Archivo", system-ui, sans-serif;
+  font-size: 1.0625rem;
+  font-weight: 450;
+  line-height: 1.5;
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--ink); color: var(--field); }
+
+a { color: inherit; }
+
+/* ---------- depth: far light, the dot screen, and the page in front ---------- */
+
+/* Far plane: a few out-of-focus discs of light, far behind and still.
+   They sit around the edges so each field keeps its own colour where the eye lands. */
+.far {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  overflow: hidden;
+  pointer-events: none;
+  filter: blur(10px);
+}
+.far i {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--bokeh) 0 64%, transparent 70%);
+}
+.far i:nth-child(1) { width: 34vmax; height: 34vmax; left: 68vw; top: -12vmax; }
+.far i:nth-child(2) { width: 16vmax; height: 16vmax; left: 86vw; top: 52vh; }
+.far i:nth-child(3) { width: 22vmax; height: 22vmax; left: -12vmax; top: calc(100vh - 6vmax); }
+.far i:nth-child(4) { width: 9vmax; height: 9vmax; left: 74vw; top: 36vh; opacity: 0.7; }
+.far i:nth-child(5) { width: 6vmax; height: 6vmax; left: 92vw; top: 22vh; opacity: 0.6; }
+.far i:nth-child(6) { width: 12vmax; height: 12vmax; left: 34vw; top: -6vmax; opacity: 0.5; }
+
+/* Mid plane: the unlit dot screen, scrolling at a third of the page's speed. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: radial-gradient(circle, var(--faint) 0 1px, transparent 1.5px);
+  background-size: var(--g) var(--g);
+  background-position: 0 var(--py, 0px);
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -100px;
+  z-index: 20;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--field);
+  font-weight: 700;
+  text-decoration: none;
+}
+.skip:focus { top: 12px; }
+
+/* The LED wall: one panel of cells behind the whole page, scrolling with it. A tiny signal canvas (one pixel per
+   cell) is scaled up pixel-exact and masked into round cells; the gaps show the field and the
+   light behind it. Without the wall, the CSS dot screen above stands in. */
+.wall {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: clip;
+  pointer-events: none;
+}
+.wall canvas {
+  position: absolute;
+  left: 0;
+  top: var(--top, 0px);
+  image-rendering: pixelated;
+}
+.wall-cells {
+  -webkit-mask-image: radial-gradient(circle at center, #000 0 calc(var(--pitch, 8px) * 0.4), transparent calc(var(--pitch, 8px) * 0.4 + 0.75px));
+  mask-image: radial-gradient(circle at center, #000 0 calc(var(--pitch, 8px) * 0.4), transparent calc(var(--pitch, 8px) * 0.4 + 0.75px));
+  -webkit-mask-size: var(--pitch, 8px) var(--pitch, 8px);
+  mask-size: var(--pitch, 8px) var(--pitch, 8px);
+}
+/* each cell is a small domed lens: a highlight up and left, a darker rim at its edge */
+.wall-gloss {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 37% 33%, rgba(255, 255, 255, 0.26) 0 calc(var(--pitch, 8px) * 0.06), transparent calc(var(--pitch, 8px) * 0.17)),
+    radial-gradient(circle at 50% 50%, transparent 0 calc(var(--pitch, 8px) * 0.26), rgba(0, 0, 0, 0.07) calc(var(--pitch, 8px) * 0.37), transparent calc(var(--pitch, 8px) * 0.41));
+  background-size: var(--pitch, 8px) var(--pitch, 8px);
+}
+:root[data-field="black"] .wall-gloss { opacity: 0.7; }
+
+/* lit cells bleed light behind the panel; only where the ink is light */
+.wall-bloom {
+  filter: blur(10px);
+  opacity: var(--glow);
+}
+.wall-on body::before { display: none; }
+/* with the wall on, the gaps between cells are drawn by the wall itself (the wall-gaps layer), so they
+   pour with the cells; the page background only shows outside the panel */
+:root.wall-on { background: var(--gap); }
+.wall-on .name-dots,
+.wall-on .name-bloom { visibility: hidden; }
+
+/* ---------- rail: a fixed frame on the right that says where you are ---------- */
+
+.rail {
+  position: fixed;
+  top: 50%;
+  right: clamp(12px, 1.6vw, 28px);
+  z-index: 15;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 22px;
+  padding: 18px 0;
+  border-right: var(--line) solid var(--ink);
+}
+.rail a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 10px;
+  margin-right: -1px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-stretch: 112%;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--soft);
+  outline: none;
+}
+.rail a span { order: -1; }
+.rail i {
+  width: 7px;
+  height: 7px;
+  border: var(--line) solid var(--ink);
+}
+.rail a:hover,
+.rail a:focus-visible,
+.rail a.here { color: var(--ink); }
+.rail a.here i,
+.rail a:hover i { background: var(--ink); }
+.rail a:focus-visible span { text-decoration: underline; text-underline-offset: 4px; }
+
+/* ---------- stage ---------- */
+
+.stage {
+  min-height: 100svh;
+  padding: var(--gutter);
+  padding-right: calc(var(--gutter) + 110px);
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+}
+
+.caption {
+  width: fit-content;
+  margin: clamp(22px, 3.5vh, 40px) 0 0;
+  font-size: clamp(1rem, 1.25vw, 1.2rem);
+  font-weight: 700;
+  font-stretch: 112%;
+  line-height: 1.3;
+}
+
+.name {
+  position: relative;
+  margin: clamp(8px, 3vh, 40px) 0 0;
+  /* short screens: keep the destinations in the first viewport */
+  width: min(100%, 74vw, max(300px, calc((100svh - 330px) * 2.8)));
+  line-height: 0.8;
+}
+.name-text {
+  display: block;
+  font-size: clamp(4.5rem, 20vw, 6rem);
+  font-weight: 900;
+  font-stretch: 100%;
+  letter-spacing: -0.03em;
+}
+.name-dots,
+.name-bloom { display: none; }
+.dots-on .name-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.dots-on .name-dots { display: block; position: relative; }
+/* the lit dots bleed light behind themselves, strongest on the black field */
+.dots-on .name-bloom {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 0;
+  filter: blur(9px);
+  opacity: var(--glow);
+}
+
+.targets {
+  align-self: end;
+  list-style: none;
+  margin: clamp(40px, 7vh, 96px) 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: clamp(16px, 2.4vw, 40px);
+}
+
+.target {
+  text-decoration: none;
+  outline: none;
+}
+.targets .target {
+  display: block;
+  padding: 14px 0 6px;
+  border-top: var(--line) solid var(--ink);
+}
+.t-name {
+  display: block;
+  font-size: clamp(1.25rem, 2.1vw, 1.8rem);
+  font-weight: 800;
+  font-stretch: 112%;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+}
+.t-note {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.ext {
+  width: 0.7em;
+  height: 0.7em;
+  margin-left: 0.15em;
+  vertical-align: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+/* Touch: a tap on one of the four destinations selects it (the lock, the pour, the caption); the
+   selected one shows this control, and only this opens it. A stray touch on a destination can
+   never leave the page. Shown whenever the last input was touch (main.js sets .touch-ui), so touch
+   laptops get it too; a 44px target, in the tracker's line and label voice. */
+.t-open { display: none; }
+.touch-ui .targets .target { position: relative; padding-right: 96px; }
+.touch-ui .t-open {
+  position: absolute;
+  right: 0;
+  top: calc(50% + 4px);
+  translate: 0 -50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 80px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: var(--line) solid var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-stretch: 112%;
+  line-height: 1;
+  color: var(--ink);
+  visibility: hidden;
+}
+.touch-ui .targets .target.current .t-open { visibility: visible; }
+.touch-ui .t-open:active { background: var(--ink); color: var(--field); }
+/* on touch the destination's own note already names where it goes, and the open control sits
+   where the tracker's caption would: the caption steps aside */
+.touch-ui .lock-say { display: none; }
+
+/* Without the tracker, links still show focus plainly. */
+.target:focus-visible {
+  outline: var(--line) solid var(--ink);
+  outline-offset: 6px;
+}
+.js .target:focus-visible { outline: none; }
+
+/* ---------- public work ---------- */
+
+.work,
+.close {
+  padding: var(--step) calc(var(--gutter) + 110px) var(--step) var(--gutter);
+}
+
+h2 {
+  margin: 0 0 clamp(40px, 4.5vw, 64px);
+  font-size: clamp(3rem, 8.5vw, 6rem);
+  font-weight: 800;
+  font-stretch: 62%;
+  line-height: 0.9;
+  letter-spacing: -0.02em;
+  width: fit-content;
+}
+
+.work-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: clamp(32px, 6vw, 112px);
+  align-items: start;
+}
+
+.result-lead {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 1.125rem;
+}
+.result-lead .target-inline {
+  display: block;
+  width: fit-content;
+  margin-bottom: 16px;
+}
+.target-inline {
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-thickness: var(--line);
+  text-underline-offset: 0.22em;
+}
+.tally {
+  margin: 14px 0 0;
+  max-width: 30ch;
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.reports {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.report {
+  display: block;
+  padding: 20px 0 30px;
+  border-top: var(--line) solid var(--ink);
+}
+.reports li:last-child .report { border-bottom: var(--line) solid var(--ink); }
+.r-meta {
+  display: block;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--soft);
+  font-variant-numeric: tabular-nums;
+}
+.r-meta b {
+  color: var(--ink);
+  font-weight: 800;
+  font-stretch: 112%;
+  margin-right: 0.5em;
+}
+.r-title {
+  display: block;
+  margin-top: 6px;
+  max-width: 46ch;
+  font-size: clamp(1.125rem, 1.5vw, 1.3rem);
+  font-weight: 600;
+  line-height: 1.3;
+  text-wrap: pretty;
+}
+
+/* ---------- close ---------- */
+
+.close h2 { margin-bottom: clamp(44px, 5vw, 72px); }
+.close-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px clamp(28px, 4vw, 64px);
+}
+.close-links .target {
+  display: inline-block;
+  padding: 4px 0;
+  font-size: clamp(1.75rem, 4vw, 3rem);
+  font-weight: 800;
+  font-stretch: 112%;
+  letter-spacing: -0.01em;
+}
+
+/* Where the demonlist went (see .list-note): the list's own button
+   (xylz.online/list's .button-54: Open Sans caps spaced 2px, a 3px black border, #F0F0F0, a shadow
+   stepped out 1 to 5px, grey on hover, pressed flat), with its pixel banana. It keeps those colours
+   in every field, a piece of the other site. */
+.list-button img { image-rendering: pixelated; }
+.list-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Open Sans", Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 400;
+  font-stretch: 100%;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: #000;
+  background: #F0F0F0;
+  border: 3px solid #000;
+  padding: 0.25em 0.5em;
+  box-shadow: 1px 1px 0 0 #000, 2px 2px 0 0 #000, 3px 3px 0 0 #000, 4px 4px 0 0 #000, 5px 5px 0 0 #000;
+  transition: background 0.5s;
+}
+@media (hover: hover) {
+  a.list-button:hover { background: rgb(200, 200, 205); }
+}
+a.list-button:active { box-shadow: none; top: 5px; left: 5px; }
+a.list-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 6px; }
+
+/* the demonlist moved to /list: for anyone looking for it, a note in the empty corner above the
+   name, without moving anything */
+.list-note {
+  position: absolute;
+  top: clamp(14px, 2.4vh, 26px);
+  left: var(--gutter);
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-stretch: 112%;
+  line-height: 1.3;
+}
+.list-note .list-button {
+  font-size: 11px;
+  border-width: 2px;
+  padding: 0.2em 0.5em;
+  box-shadow: 1px 1px 0 0 #000, 2px 2px 0 0 #000, 3px 3px 0 0 #000;
+}
+.list-note a.list-button:active { top: 3px; left: 3px; }
+
+/* ---------- tracker: the near plane ---------- */
+
+.tracker {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
+/* no stacking context of its own: each part sits in front of the page directly, so the gaze
+   squares can invert what is behind them */
+.tracker > * { z-index: 10; }
+.wire {
+  position: absolute;
+  inset: 0 auto auto 0;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+}
+.wire line {
+  stroke: var(--ink);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+/* a tracked point: an outline square around a filled one */
+.wire .node-o { fill: none; stroke: var(--ink); stroke-width: 1; shape-rendering: crispEdges; }
+.wire .node-i { fill: var(--ink); shape-rendering: crispEdges; }
+
+.lock {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border: var(--line) solid var(--ink);
+  opacity: 0;
+  transition:
+    transform 110ms steps(3, end),
+    width 110ms steps(3, end),
+    height 110ms steps(3, end);
+}
+.locked .lock { opacity: 1; }
+.lock i,
+.after i {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: var(--ink);
+}
+.lock i:nth-child(1), .after i:nth-child(1) { left: -4px; top: -4px; }
+.lock i:nth-child(2), .after i:nth-child(2) { right: -4px; top: -4px; }
+.lock i:nth-child(3), .after i:nth-child(3) { left: -4px; bottom: -4px; }
+.lock i:nth-child(4), .after i:nth-child(4) { right: -4px; bottom: -4px; }
+
+/* where the lock just was: it stays as an afterimage and sinks back */
+.after {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: var(--line) solid var(--ink);
+  animation: sink 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+@keyframes sink {
+  from { opacity: 0.45; }
+  to { opacity: 0; }
+}
+
+.lock-say {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-stretch: 112%;
+  line-height: 1;
+  opacity: 0;
+}
+.locked .lock-say { opacity: 1; }
+
+/* related items: tick-only boxes, set back at 45% so the lock is the only full-ink plane */
+.ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0.45;
+}
+.wire .rel { opacity: 0.45; }
+.ghost i {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  background: var(--ink);
+}
+.ghost i:nth-child(1) { left: -3px; top: -3px; }
+.ghost i:nth-child(2) { right: -3px; top: -3px; }
+.ghost i:nth-child(3) { left: -3px; bottom: -3px; }
+.ghost i:nth-child(4) { right: -3px; bottom: -3px; }
+
+/* intent: where the pointer is heading, the tracker leads with a dashed line and corner ticks */
+.lead {
+  position: absolute;
+  inset: 0 auto auto 0;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.lead line {
+  stroke: var(--ink);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  shape-rendering: crispEdges;
+}
+.lead-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+}
+.lead-box i {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border: 0 solid var(--ink);
+}
+.lead-box i:nth-child(1) { left: -5px; top: -5px; border-width: 1px 0 0 1px; }
+.lead-box i:nth-child(2) { right: -5px; top: -5px; border-width: 1px 1px 0 0; }
+.lead-box i:nth-child(3) { left: -5px; bottom: -5px; border-width: 0 0 1px 1px; }
+.lead-box i:nth-child(4) { right: -5px; bottom: -5px; border-width: 0 1px 1px 0; }
+.leading .lead { opacity: 0.55; }
+.leading .lead-box { opacity: 1; }
+
+/* gaze: where the visitor is probably looking. The belief is drawn as faint LED cells under the
+   text; over it, the scanpath: one node per fixation, ghosts of earlier ones, the saccades between. */
+.gaze-cloud {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+main { position: relative; z-index: 1; }
+.gaze-path {
+  position: absolute;
+  inset: 0 auto auto 0;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.gaze-path line {
+  stroke: var(--ink);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+/* a node: a hairline box around a solid square */
+.gaze-node {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: var(--line) solid color-mix(in oklab, var(--ink) 72%, transparent);
+  opacity: 0;
+}
+/* the jump: the box crosses to the new fixation in three frames, like the lock */
+.gaze-node.now {
+  transition:
+    transform 90ms steps(3, end),
+    width 90ms steps(3, end),
+    height 90ms steps(3, end);
+}
+/* the bloom around the current square on the black field: a plain gradient laid over it (under
+   it, it would brighten what the square inverts), not a shadow on the blended square (a blurred
+   shadow there cost Chrome a dropped frame or two) */
+.gaze-glow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 132px;
+  height: 132px;
+  margin: -66px 0 0 -66px;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.1) 45%, rgba(255, 255, 255, 0));
+  opacity: 0;
+  transition: transform 90ms steps(3, end);
+}
+:root:not([data-field="black"]) .gaze-glow { display: none; }
+/* The square inverts whatever lies under it, so text inside it stays legible: field and ink swap
+   places inside the square. */
+.gaze-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--f, 18px);
+  height: var(--f, 18px);
+  /* --swap is |field - ink| per channel: through difference the field turns exactly ink and ink
+     turns exactly field, so the square is solid ink with the text under it cut out of it */
+  background: var(--swap);
+  mix-blend-mode: difference;
+  opacity: 0;
+}
+/* its size is the dwell: main.js grows it in steps for as long as the fixation holds, then stops */
+.gaze-fill.now { transition: transform 90ms steps(3, end); }
+.gazing .gaze-path,
+.gazing .gaze-node.now,
+.gazing .gaze-fill.now,
+.gazing .gaze-glow,
+.gazing .gaze-say:not(.ghost-say) { opacity: 1; }
+/* one dashed predictor at a time: while the intent lead shows, the gaze tracker steps back */
+.leading .gaze-path,
+.leading .gaze-node,
+.leading .gaze-fill,
+.leading .gaze-glow,
+.leading .gaze-say { visibility: hidden; }
+.gaze-say {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-stretch: 108%;
+  line-height: 1.2;
+  opacity: 0;
+  font-variant-numeric: tabular-nums;
+}
+.gaze-say > span { display: block; }
+.gaze-say .pr { color: var(--soft); font-weight: 500; }
+.gaze-say.echo { margin: 5px 0 0 7px; }
+@media (prefers-reduced-motion: reduce) {
+  .gaze-cloud, .gaze-path, .gaze-node, .gaze-fill, .gaze-glow, .gaze-say { display: none; }
+}
+
+/* the pointer is tracked too */
+.reticle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 26px;
+  height: 26px;
+  opacity: 0;
+}
+.pointer-in .reticle.on { opacity: 1; }
+.reticle i {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 0 solid var(--ink);
+}
+.reticle i:nth-child(1) { left: 0; top: 0; border-width: 1px 0 0 1px; }
+.reticle i:nth-child(2) { right: 0; top: 0; border-width: 1px 1px 0 0; }
+.reticle i:nth-child(3) { left: 0; bottom: 0; border-width: 0 0 1px 1px; }
+.reticle i:nth-child(4) { right: 0; bottom: 0; border-width: 0 1px 1px 0; }
+
+/* ---------- small screens ---------- */
+
+@media (max-width: 860px) {
+  /* the name sits near the top here: the stage makes room for the demonlist note (up to two lines) */
+  .stage:has(.list-note) { padding-top: calc(var(--gutter) + 52px); }
+  .rail { display: none; }
+  .stage { padding-right: var(--gutter); }
+  .work,
+  .close { padding: var(--step) var(--gutter); }
+  /* short screens (a phone on its side): the name shrinks with the height, so the destinations
+     stay in the first view */
+  .name { width: min(100%, max(240px, calc((100svh - 280px) * 2.8))); }
+  .targets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .work-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 420px) {
+  /* the demonlist note wraps to two lines here */
+  .stage:has(.list-note) { padding-top: calc(var(--gutter) + 70px); }
+  .targets { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+  .targets .target { padding-bottom: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lock { transition: none; }
+  .after { display: none; }
+}

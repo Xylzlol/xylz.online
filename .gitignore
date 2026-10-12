@@ -1,0 +1,28 @@
+# pre-compressed copies are build output: tools/compress.py makes them
+*.br
+*.gz
+
+# working files that stay on this machine
+/.claude/
+/.impeccable/
+/explorations/
+/deploy/
+/CLAUDE_DESKTOP_HANDOFF.md
+/HANDOFF.md
+/PRODUCT.md
+/tools/favicon-work/
+
+# training: code is tracked, data, environments and checkpoints are not
+/ml/data/
+/ml/spans/
+/ml/tmp*/
+/ml/pipcache/
+/ml/.venv/
+/ml/unisal/
+/ml/*.pth
+/ml/*.onnx
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
