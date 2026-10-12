@@ -1076,15 +1076,17 @@
     host.append(gaps, bloom, cells, gloss);
 
     let post = null;
+    let givePort = null; // hands the wall a port to the gaze worker, for its change map
     try {
       if (window.Worker && cells.transferControlToOffscreen) {
-        const worker = new Worker("wall-worker.js?v=20261013n9");
+        const worker = new Worker("wall-worker.js?v=20261013n14");
         worker.onmessage = (e) => committed(e.data);
         const oc = cells.transferControlToOffscreen();
         const ob = bloom.transferControlToOffscreen();
         const og = gaps.transferControlToOffscreen();
         worker.postMessage({ type: "init", canvas: oc, bloom: ob, gaps: og, debug: location.search.includes("debug") }, [oc, ob, og]);
         post = (m) => worker.postMessage(m);
+        givePort = (port) => worker.postMessage({ type: "motionPort", port }, [port]);
       } else if (window.createWall) {
         const w = window.createWall((fn) => requestAnimationFrame(fn), (m) => committed(m));
         w.handle({ type: "init", canvas: cells, bloom, gaps });
@@ -1238,7 +1240,7 @@
     post({ type: "reduce", reduce: reduceMotion.matches });
     document.addEventListener("visibilitychange", () => post({ type: "visible", visible: !document.hidden }));
 
-    return { size, scroll, field, masks, lens, lock, prepare, pinText };
+    return { size, scroll, field, masks, lens, lock, prepare, pinText, givePort };
   })();
 
   /* ---------- gaze: where the visitor is probably looking (gaze-worker.js + gaze.js) ----------
@@ -1255,10 +1257,17 @@
     document.body.prepend(cloud);
     cloud.width = innerWidth;
     cloud.height = innerHeight;
-    const gw = new Worker("gaze-worker.js?v=20261013n9");
+    const gw = new Worker("gaze-worker.js?v=20261013n14");
     const oc = cloud.transferControlToOffscreen();
     const inkNow = () => getComputedStyle(root).getPropertyValue("--ink").trim();
-    gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow() }, [oc]);
+    gw.postMessage({ type: "init", canvas: oc, N: 600, pitch: 8, ink: inkNow(), dyn: /[?&]dyn(?:[=&]|$)/.test(location.search) }, [oc]);
+    // the wall tells the gaze worker directly what moves on screen; the page never touches it (only
+    // with ?dyn until the moving-content layer passes its certificate: off, the wall measures nothing)
+    if (wallCtl && wallCtl.givePort && /[?&]dyn(?:[=&]|$)/.test(location.search)) {
+      const ch = new MessageChannel();
+      wallCtl.givePort(ch.port1);
+      gw.postMessage({ type: "motionPort", port: ch.port2 }, [ch.port2]);
+    }
     reduceMotion.addEventListener("change", () => {
       gw.postMessage({ type: "reduce", reduce: reduceMotion.matches });
     });
@@ -1527,7 +1536,10 @@
     }
     addEventListener("resize", clearPath);
 
+    if (location.search.includes("debug")) window.__gazeWorker = gw; // tools/ read the change maps through it
     gw.onmessage = (e) => {
+      if (e.data && e.data.type === "motionLog") { window.__motionLog = e.data.log; return; }
+      if (window.__gazeWorker && e.data && e.data.type === "show") (window.__gazeShows = window.__gazeShows || []).push({ t: performance.now(), x: e.data.x, y: e.data.y, r50: e.data.r50 });
       const m = e.data;
       if (m.type === "show") show(m);
       // the worker says which model it runs: the learned one needs no saliency network, so the
@@ -1559,7 +1571,7 @@
     function startNeural() {
       let worker;
       try {
-        worker = new Worker("saliency-worker.js?v=20261013n9", { type: "module" });
+        worker = new Worker("saliency-worker.js?v=20261013n14", { type: "module" });
       } catch (err) {
         return;
       }

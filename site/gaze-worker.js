@@ -3,12 +3,15 @@
    OffscreenCanvas the page handed over); and the fixation-like decision of when the tracker jumps.
    The page only hears about real jumps. With no input for 1.5s the loop stops and the picture holds
    still; any input wakes it. */
-importScripts("gaze.js?v=20261013n9");
+importScripts("gaze.js?v=20261013n14");
 const createParticles = self.createGaze;
-importScripts("gaze-net.js?v=20261013n9");
+importScripts("gaze-net.js?v=20261013n14");
 const createNet = self.createGaze;
+importScripts("gaze-dyn.js?v=20261013n14");
+// the moving-content layer runs only when the page asks for it (?dyn), until its certificate passes
+self.GAZE_DYN = false;
 let netReady = null; // a promise of the parsed weights, or null when they failed
-netReady = fetch("gaze-net.bin?v=20261013n9").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
+netReady = fetch("gaze-net.bin?v=20261013n14").then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(r.status)))
   .then((buf) => { createNet.setNet(createNet.parse(buf)); return true; }).catch(() => false);
 
 let g = null;
@@ -115,9 +118,30 @@ function loop(now) {
   raf(loop);
 }
 
+/* What moves on screen, straight from the wall worker: a block grid of brightness change per
+   second, in document coordinates (see sampleMotion in wall.js). Kept as the latest map; the
+   model reads it when it estimates. */
+let motion = null;
+self.__motionLog = null; // with ?debug the page can ask for the recent maps
+function onMotion(m) {
+  motion = m;
+  if (self.__motionLog) { self.__motionLog.push({ t: m.t, by0: m.by0, nbx: m.nbx, nby: m.nby, B: m.B, pitch: m.pitch, e: Array.from(m.e) }); if (self.__motionLog.length > 400) self.__motionLog.shift(); }
+  if (g && g.motion && self.GAZE_DYN !== false) {
+    g.motion(m);
+    wake(); // the maps only come while the wall moves, so this wakes the loop only then
+  }
+}
+
 onmessage = (e) => {
   const m = e.data;
   switch (m.type) {
+    case "motionPort":
+      m.port.onmessage = (ev) => onMotion(ev.data);
+      return;
+    case "motionLog":
+      if (m.on) self.__motionLog = [];
+      else postMessage({ type: "motionLog", log: self.__motionLog || [] });
+      return;
     case "reduce":
       paused = !!m.reduce;
       if (paused) {
@@ -127,6 +151,7 @@ onmessage = (e) => {
       }
       break;
     case "init":
+      if (m.dyn) self.GAZE_DYN = m.dynParams || null;
       // the learned model when its weights are in, the particle filter otherwise; the first layout
       // message usually arrives after the weights, and a late load swaps the model in then
       g = createParticles(m.N);

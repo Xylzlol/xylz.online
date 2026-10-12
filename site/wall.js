@@ -876,11 +876,65 @@
         S.gapKey = fl ? null : gapKey;
       }
       if (S.bctx && S.glow > 0 && dh > 0) S.bctx.putImageData(S.img, 0, 0, 0, dirty0, cols, dh);
+      if (S.motionPort) sampleMotion(now);
       notify({ type: "committed", rowStart: S.rowStart });
     }
 
     function tick(now) {
       timed("frame", () => tick0(now));
+    }
+
+    /* What the visitor's eyes are offered: how much the wall changed on screen, block by block.
+       This thread drew every cell, so the change is exact, not estimated from pixels. One cell in
+       nine (every third row and column) is compared with its last drawn brightness; a block is
+       MOTION_B x MOTION_B cells. The changes add up between posts and go to the gaze worker as a
+       rate (brightness change per second) about 20 times a second. Cells are anchored to the
+       document, so scrolling by itself is not change, as for eyes that ride along with the page. */
+    const MOTION_B = 6, MOTION_MS = 50;
+    function sampleMotion(now) {
+      const cols = S.cols, rows = S.rows, pitch = S.pitch, d = S.img.data;
+      const key = `${cols}x${rows}|${S.rowStart}|${pitch}`;
+      if (S.mKey !== key) {
+        S.mKey = key;
+        S.mPrev = new Float32Array(cols * rows).fill(-1);
+        S.mAcc = null;
+        S.mFrom = now;
+      }
+      const top = Math.max(S.rowStart, Math.floor(S.scrollY / pitch));
+      const bot = Math.min(S.rowStart + rows, Math.ceil((S.scrollY + (S.vh || 900)) / pitch));
+      const by0 = Math.floor(top / MOTION_B), by1 = Math.ceil(bot / MOTION_B);
+      const nbx = Math.ceil(cols / MOTION_B), nby = Math.max(0, by1 - by0);
+      if (!S.mAcc || S.mBy0 !== by0 || S.mAcc.length !== nbx * nby) {
+        S.mAcc = new Float32Array(nbx * nby);
+        S.mN = new Uint16Array(nbx * nby);
+        S.mBy0 = by0;
+        S.mFrom = now;
+      }
+      const acc = S.mAcc, cnt = S.mN, prev = S.mPrev;
+      S.mFrames = (S.mFrames || 0) + 1;
+      // the sampled rows are the document rows 1, 4, 7, ... that are on screen
+      for (let row = top + ((1 - (top % 3)) + 3) % 3; row < bot; row += 3) {
+        const r = row - S.rowStart, bRow = (Math.floor(row / MOTION_B) - by0) * nbx;
+        if (r < 0 || r >= rows) continue;
+        for (let c = 1, i = r * cols + 1; c < cols; c += 3, i += 3) {
+          const o = i * 4;
+          const y = 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2];
+          const b = bRow + ((c / MOTION_B) | 0);
+          if (prev[i] >= 0) acc[b] += Math.abs(y - prev[i]) / 255;
+          prev[i] = y;
+          if (cnt[b] < 65535) cnt[b]++;
+        }
+      }
+      if (now - S.mFrom < MOTION_MS) return;
+      const secs = (now - S.mFrom) / 1000;
+      // per block: mean change per sampled cell per second, over the interval since the last post
+      const frames = S.mFrames;
+      const e = new Float32Array(nbx * nby);
+      for (let b = 0; b < e.length; b++) e[b] = cnt[b] ? (acc[b] / (cnt[b] / frames)) / secs : 0;
+      S.motionPort.postMessage({ type: "motion", t: now, dt: secs, pitch, B: MOTION_B, by0, nbx, nby, e }, [e.buffer]);
+      acc.fill(0); cnt.fill(0);
+      S.mFrom = now;
+      S.mFrames = 0;
     }
     function tick0(now) {
       S.queued = false;
@@ -955,6 +1009,9 @@
           break;
         case "resize":
           resize(m);
+          break;
+        case "motionPort":
+          S.motionPort = m.port;
           break;
         case "field": {
           S.old = { field: S.field, ink: S.ink, base: S.base, amp: S.amp, gap: S.gap };

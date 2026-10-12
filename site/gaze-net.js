@@ -98,6 +98,7 @@
     let est = { x: view.w / 2, y: view.h / 2, r50: 400 };
     let at = [0, 0];      // the cursor in page px when the mixture was computed
     let textLines = [];   // for the display: the belief is never drawn over text
+    let dyn = null;       // the moving-content layer, made on the first change map
 
     function features(now) {
       const w = view.w, h = view.h;
@@ -151,28 +152,31 @@
       }
       for (let k = 0; k < K; k++) pi[k] /= z;
       mix = { pi, mx, my, sx, sy, K };
+      const [, cx, cy] = hist[hist.length - 1];
+      at = [cx + view.x, cy + view.y];
+      // what moves on screen takes its share (gaze-dyn.js), when the wall reports motion
+      if (dyn) mix = dyn.apply(mix, at, now);
+      const M = mix;
       // the densest point: start at each component mean, keep the best
       const dens = (x, y) => {
         let s = 0;
-        for (let k = 0; k < K; k++) {
-          const a = (x - mx[k]) / sx[k], b = (y - my[k]) / sy[k];
-          s += (pi[k] / (sx[k] * sy[k])) * Math.exp(-0.5 * (a * a + b * b));
+        for (let k = 0; k < M.K; k++) {
+          const a = (x - M.mx[k]) / M.sx[k], b = (y - M.my[k]) / M.sy[k];
+          s += (M.pi[k] / (M.sx[k] * M.sy[k])) * Math.exp(-0.5 * (a * a + b * b));
         }
         return s;
       };
-      let bx = mx[0], by = my[0], bd = -1;
-      for (let k = 0; k < K; k++) { const d = dens(mx[k], my[k]); if (d > bd) { bd = d; bx = mx[k]; by = my[k]; } }
+      let bx = M.mx[0], by = M.my[0], bd = -1;
+      for (let k = 0; k < M.K; k++) { const d = dens(M.mx[k], M.my[k]); if (d > bd) { bd = d; bx = M.mx[k]; by = M.my[k]; } }
       // the radius around it that holds half the mixture: 512 deterministic samples (fixed normal draws)
       const r = new Float32Array(SAMPLES.length);
       for (let i = 0; i < SAMPLES.length; i++) {
         const [u, n1, n2] = SAMPLES[i];
-        let k = 0, acc = pi[0];
-        while (u > acc && k < K - 1) acc += pi[++k];
-        r[i] = Math.hypot(mx[k] + sx[k] * n1 - bx, my[k] + sy[k] * n2 - by);
+        let k = 0, acc = M.pi[0];
+        while (u > acc && k < M.K - 1) acc += M.pi[++k];
+        r[i] = Math.hypot(M.mx[k] + M.sx[k] * n1 - bx, M.my[k] + M.sy[k] * n2 - by);
       }
       r.sort();
-      const [, cx, cy] = hist[hist.length - 1];
-      at = [cx + view.x, cy + view.y];
       est = { x: at[0] + bx, y: at[1] + by, r50: r[r.length >> 1] };
     }
 
@@ -198,6 +202,13 @@
       },
       click(x, y) { lastClick = performance.now(); click = [x, y]; },
       intent() {}, onset() {}, saliency() {},
+      // the wall's change map (gaze-dyn.js); without it the estimate is the net's alone
+      motion(m) {
+        if (!dyn && self.createGazeDyn && self.GAZE_DYN !== false) dyn = self.createGazeDyn(self.GAZE_DYN || null);
+        if (!dyn) return;
+        const c = hist.length ? [hist[hist.length - 1][1] + view.x, hist[hist.length - 1][2] + view.y] : null;
+        dyn.motion(m, c);
+      },
       step(now) {
         if (!NET || !hist.length || now - lastEval < 100) return;
         lastEval = now;
